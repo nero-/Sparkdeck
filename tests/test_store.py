@@ -44,7 +44,7 @@ async def test_restart_continuity(tmp_path):
     fresh = SeriesStore(db, ref)  # post-restart: empty rings
     res = await fresh.query(["n1"], ["gpu.util"], window_s=1200, max_points=400)
     series = res["series"]["gpu.util"]
-    assert len(series["t"]) >= 20, f"continuity lost: {len(series['t'])}"
+    assert len(series["t"]) >= 10, f"continuity lost: {len(series['t'])}"  # 70×2s → ~14 raw slots
     # no giant hole across the merged window (raw is the dominant layer here)
     deltas = [series["t"][i + 1] - series["t"][i] for i in range(len(series["t"]) - 1)]
     assert max(deltas) <= 65_000, max(deltas)  # ≤ ~1 min gap tolerance

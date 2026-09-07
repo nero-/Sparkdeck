@@ -11,6 +11,8 @@ import { errCopy, offerAuthGate } from '../../lib/pagekit';
 import { toast } from '../../ds';
 import type { AppSettings } from '../../api/types';
 
+export type { SettingsPatch } from '../../api/admin';
+
 export interface SettingsGate {
   data: AppSettings | null;
   loading: boolean;

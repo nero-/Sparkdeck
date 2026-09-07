@@ -260,44 +260,15 @@ export function useHistory(args: MetricsHistoryArgs | null | undefined): History
 
   const [data, setData] = useState<HistoryResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(args !== null && args !== undefined);
   const [tick, setTick] = useState(0);
 
-  const recall = useCallback((argsInner: MetricsHistoryArgs): void => {
-    void metricsHistory(argsInner)
-      .then((d) => {
-        setData(d);
-        setError(null);
-        setLoading(false);
-      })
-      .catch((e: unknown) => {
-        setError(e);
-        setLoading(false);
-      });
-  }, []);
+  const hasArgs = key !== '';
+  const loading = hasArgs && data === null && error === null;
 
   useEffect(() => {
     if (args === null || args === undefined) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const runOnce = () => {
-      void (async () => {
-        try {
-          const d = await metricsHistory(args);
-          if (!active) return;
-          setData(d);
-          setError(null);
-          setLoading(false);
-        } catch (e) {
-          if (!active) return;
-          setError(e);
-          setLoading(false);
-        } finally {
-          if (active) schedule(windowPollMs(args.window));
-        }
-      })();
-    };
 
     const schedule = (ms: number) => {
       timer = setTimeout(() => {
@@ -307,6 +278,22 @@ export function useHistory(args: MetricsHistoryArgs | null | undefined): History
         }
         runOnce();
       }, ms);
+    };
+
+    const runOnce = () => {
+      void (async () => {
+        try {
+          const d = await metricsHistory(args);
+          if (!active) return;
+          setData(d);
+          setError(null);
+        } catch (e) {
+          if (!active) return;
+          setError(e);
+        } finally {
+          if (active) schedule(windowPollMs(args.window));
+        }
+      })();
     };
 
     runOnce();

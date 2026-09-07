@@ -152,10 +152,10 @@ def build_frame(world: "MockWorld", node: dict, env_rank: int, head: bool) -> di
 
     mem_total = 121.7
     if serving:
-        mem_used = 118.4 + min(2.5, lc.uptime_s / 600) + random.uniform(-0.25, 0.35)
+        mem_used = 118.2 + min(1.1, lc.uptime_s / 900) + random.uniform(-0.2, 0.2)
     elif booting:
         progress = min(1.0, lc.boot_elapsed / 160)
-        mem_used = 9.0 + progress * (118.0 - 9.0) + random.uniform(-0.5, 0.5)
+        mem_used = 9.0 + progress * (117.5 - 9.0) + random.uniform(-0.4, 0.4)
     else:
         mem_used = 7.2 + _sine(t, 300, 1.2) + random.uniform(-0.15, 0.15)
     gpu_frame = {

@@ -2,7 +2,14 @@
    stores/live — live view over the WS store buffer (useLive).
    Thin facade around src/api/client.ts#useWs so pages get domain-shaped
    selectors instead of touching the store internals.
+
+   ZUSTAND v5 RULE (the render-loop foot-gun): getSnapshot must return a
+   STABLE reference. Selectors may only return values already held in the
+   store (or primitives); anything derived goes through useMemo keyed on
+   the store reference.
    ========================================================================= */
+
+import { useMemo } from 'react';
 
 import type { EventRec, ID, LiveNodeState, SampleFrame, ServiceState } from '../api/types';
 import type { WsStatus } from '../api/client';
@@ -15,27 +22,31 @@ export type { WsStatus };
 
 /** All node conn-states, newest-wins upserts. */
 export function useLiveNodes(): LiveNodeState[] {
-  return useWs((s) => Object.values(s.liveNodes));
+  const map = useWs((s) => s.liveNodes);
+  return useMemo(() => Object.values(map), [map]);
 }
 
-/** Number of nodes currently reporting 'online', optionally filtered by cluster. */
+function onlineCount(s: { liveNodes: Record<string, LiveNodeState> }, clusterId?: ID | null): number {
+  let n = 0;
+  for (const st of Object.values(s.liveNodes)) {
+    if (st.state === 'online' && (clusterId == null || st.cluster_id === clusterId)) n++;
+  }
+  return n;
+}
+
+/** Number of nodes currently reporting 'online'. */
 export function useOnlineCount(): number {
-  return useWs((s) => {
-    let n = 0;
-    for (const st of Object.values(s.liveNodes)) if (st.state === 'online') n++;
-    return n;
-  });
+  return useWs((s) => onlineCount(s));
 }
 
 export function useClusterOnlineCount(clusterId: ID | null | undefined): number {
-  return useWs((s) => {
-    if (!clusterId) return 0;
-    let n = 0;
-    for (const st of Object.values(s.liveNodes)) {
-      if (st.cluster_id === clusterId && st.state === 'online') n++;
-    }
-    return n;
-  });
+  return useWs((s) => onlineCount(s, clusterId ?? undefined));
+}
+
+function countUnacked(events: EventRec[]): number {
+  let n = 0;
+  for (const e of events) if (!e.acked) n++;
+  return n;
 }
 
 /** All last samples keyed by node. */
@@ -56,16 +67,13 @@ export function useServiceByCluster(): Record<ID, ServiceState> {
   return useWs((s) => s.serviceByCluster);
 }
 
-/** Unacked event count for the top-bar bell badge. */
+/** Unacked event count for the top-bar bell badge (primitive — loop-safe). */
 export function useUnackedEventCount(): number {
-  return useWs((s) => {
-    let n = 0;
-    for (const e of s.eventsRing) if (!e.acked) n++;
-    return n;
-  });
+  const ring = useWs((s) => s.eventsRing);
+  return useMemo(() => countUnacked(ring), [ring]);
 }
 
-/** Newest event first (ring buffer copy). */
+/** Newest event first (ring buffer reference — stable between updates). */
 export function useEventsRing(): EventRec[] {
   return useWs((s) => s.eventsRing);
 }

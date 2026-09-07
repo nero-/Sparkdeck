@@ -95,10 +95,13 @@ class RetentionSettings(BaseModel):
 
 
 class AlertSettings(BaseModel):
-    mem_warn_gib: float = 118.5
-    mem_crit_gib: float = 120.5
-    gpu_temp_warn_c: float = 80.0
-    gpu_temp_crit_c: float = 90.0
+    # GB10 unified memory: ~119–120.7 GiB used is NORMAL while serving a big
+    # NVFP4 model with pinned KV (live r2 measurement 120.7); host OOM risk
+    # sits around ~121.5 GiB (RECIPE) — headline thresholds sit just under it.
+    mem_warn_gib: float = 121.0
+    mem_crit_gib: float = 121.4
+    gpu_temp_warn_c: float = 86.0
+    gpu_temp_crit_c: float = 94.0  # GB10 zones throttle near ~96 °C
     container_restarts: int = 3
     webhook_url: str | None = None
 

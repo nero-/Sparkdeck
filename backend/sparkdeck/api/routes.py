@@ -196,7 +196,32 @@ def attach(app, a) -> None:
     # ---------------- metrics ----------------
     @r.get("/metrics/catalog")
     async def metrics_catalog():
-        return {"series": [s.model_dump() for s in default_catalog()]}
+        static_list = default_catalog()
+        # dynamic series observed in live rings (net ifaces, docker ctrs, temp zones, per-core)
+        seen: set[str] = set()
+        for node_rings in a.series.rings.values():
+            seen.update(node_rings.keys())
+        dynamic: list[dict] = []
+        for name in sorted(seen):
+            if not any(name.startswith(p) for p in ("net.", "docker.", "temp.zone.", "cpu.core.")):
+                continue
+            if any(s.id == name for s in static_list):
+                continue
+            group = name.split(".")[0]
+            if name.endswith("rx_kbps") or name.endswith("tx_kbps"):
+                unit = "kbit/s"
+            elif group == "cpu":
+                unit = "%"
+            elif name.endswith("mem_gib"):
+                unit = "GiB"
+            elif group == "temp":
+                unit = "C"
+            else:
+                unit = "?"
+            dynamic.append({"id": name, "unit": unit, "kind": "gauge",
+                            "label": name.replace(".", " · "), "group": group,
+                            "cluster_scoped": False})
+        return {"series": [s.model_dump() for s in static_list] + dynamic}
 
     @r.get("/metrics/history")
     async def metrics_history(node_id: str | None = None, cluster_id: str | None = None,

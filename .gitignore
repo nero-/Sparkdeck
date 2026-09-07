@@ -10,3 +10,9 @@ web/dist/
 data/
 .coverage
 htmlcov/
+.shots/
+.chome/
+.chrome-profile*/
+.tmpdata/
+.smoketmp/
+bench-smoke*.log

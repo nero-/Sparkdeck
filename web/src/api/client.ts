@@ -462,6 +462,25 @@ async function seedFromRest(): Promise<void> {
     } catch {
       /* ignore */
     }
+    // per-cluster service state (health/model/kv) — avoids a blank Inference
+    // page until the next 10s service tick
+    try {
+      const clusters = await api.clusters();
+      const nextService: Record<ID, ServiceState> = { ...useWs.getState().serviceByCluster };
+      await Promise.all(
+        clusters.map(async (c) => {
+          try {
+            const data = await api.get(`/llm/${c.id}/state`);
+            if (data) nextService[c.id] = data as ServiceState;
+          } catch {
+            /* cluster route hiccup — ws will fill it */
+          }
+        }),
+      );
+      useWs.setState({ serviceByCluster: nextService });
+    } catch {
+      /* ignore */
+    }
   } finally {
     seedInFlight = false;
   }

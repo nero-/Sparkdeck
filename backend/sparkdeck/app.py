@@ -338,8 +338,15 @@ class Application:
                          alert_engine=self.alerts, hub=self.hub)
 
     async def patch_settings(self, patch: dict) -> bool:
+        old_interval = self.settings_ref.settings.sampling_interval_s
         s = await patch_app_settings(self.db, patch)
         self.settings_ref.settings = s
+        if abs(s.sampling_interval_s - old_interval) > 1e-9 and self.cfg.mock is False:
+            # the collector's --interval is baked at stream start: bounce streams
+            for nid in list(self.runtimes.keys()):
+                rt = self.runtimes.pop(nid)
+                await rt.stop()
+            await self.start_runtimes()
         return True
 
     def info(self) -> dict:

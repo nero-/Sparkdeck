@@ -1,18 +1,25 @@
-/* Settings ▸ General — appearance (client store, server-mirrored), sampling
-   interval, retention. Sampling/retention only apply on the next collector
-   connect; a server restart re-uses the db, so values survive. */
+/* Settings ▸ General — appearance (client store + server mirror), sampling
+   interval, retention windows. Sampling/retention take effect on the next
+   collector connect; a server restart re-uses the db so values survive. */
 
-import { useEffect, useState } from 'react';
-import type { AppSettings } from '../../../api/types';
-import { Chip, FieldLabel, Select, Toggle, toast, useToasts } from '../../../ds';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Chip, toast } from '../../../ds';
+import { cn } from '../../../lib/cn';
 import { DirtySave, FieldMsg, NumField } from '../../../lib/pagekit';
 import { useUi, type Density, type ThemeChoice } from '../../../stores/ui';
 import type { SettingsPatch, SettingsGate } from '../useSettingsState';
+import { SectionWrap } from '../SectionWrap';
+
+/** Local aliases; the wire fields live in AppSettings.retention. */
+interface RetLocal {
+  rawHours: number;
+  oneMinDays: number;
+  tenMinDays: number;
+}
 
 export function GeneralSection({ gate }: { gate: SettingsGate }) {
   const s = gate.data;
 
-  /* server-mirrored copy of the ui store (dirty tracking against the store) */
   const uiTheme = useUi((st) => st.theme);
   const uiDensity = useUi((st) => st.density);
   const setTheme = useUi((st) => st.setTheme);
@@ -20,8 +27,8 @@ export function GeneralSection({ gate }: { gate: SettingsGate }) {
 
   const [srvTheme, setSrvTheme] = useState<ThemeChoice>('dark');
   const [srvDensity, setSrvDensity] = useState<Density>('comfortable');
-  const [interval, setIntervalS] = useState<number | null>(null);
-  const [retention, setRetention] = useState({ raw_hours: 12, minute_days: 14, decaminute_days: 60 });
+  const [intervalS, setIntervalS] = useState<number | null>(null);
+  const [ret, setRet] = useState<RetLocal>({ rawHours: 12, oneMinDays: 14, tenMinDays: 60 });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -30,35 +37,48 @@ export function GeneralSection({ gate }: { gate: SettingsGate }) {
     setSrvTheme(s.appearance.theme);
     setSrvDensity(s.appearance.density);
     setIntervalS(s.sampling_interval_s);
-    setRetention({ ...s.retention });
+    setRet({ rawHours: s.retention.raw_hours, oneMinDays: s.retention.minute_days, tenMinDays: s.retention.decaminute_days });
   }, [s]);
 
-  const duoDirty = srvTheme !== uiTheme || srvDensity !== uiDensity;
-  const retentionDirty =
-    interval !== (s?.sampling_interval_s ?? null) ||
-    retention.raw_hours !== (s?.retention.raw_hours ?? -1) ||
-    retention.minute_days !== (s?.retention.minute_days ?? -1) ||
-    retention.decaminue !== (s?.retention.decaminue ?? -1);
-  void retentionDirty;
+  const setRetentionKey = (k: keyof RetLocal) => (v: number | null) =>
+    setRet((cur) => ({ ...cur, [k]: v ?? cur[k] }));
 
-  const poll = 1 <= (interval ?? 0) && (interval ?? 0) <= 10;
+  const intervalOk = intervalS !== null && Number.isFinite(intervalS) && intervalS >= 1 && intervalS <= 10;
+  const retentionValid =
+    Number.isInteger(ret.rawHours) && ret.rawHours > 0 &&
+    Number.isInteger(ret.oneMinDays) && ret.oneMinDays > 0 &&
+    Number.isInteger(ret.tenMinDays) && ret.tenMinDays > 0;
 
-  const applyUiNow = (): void => {
-    setTheme(srvTheme);
-    setDensity(srvDensity);
-    toast.info('Appearance applied locally — mirrored to the controller on save.');
+  const dirty =
+    s !== null &&
+    (srvTheme !== s.appearance.theme ||
+      srvDensity !== s.appearance.density ||
+      intervalS !== s.sampling_interval_s ||
+      ret.rawHours !== s.retention.raw_hours ||
+      ret.oneMinDays !== s.retention.minute_days ||
+      ret.tenMinDays !== s.retention.decaminute_days);
+
+  const reset = (): void => {
+    setSrvTheme(s?.appearance.theme ?? 'dark');
+    setSrvDensity(s?.appearance.density ?? 'comfortable');
+    setIntervalS(s?.sampling_interval_s ?? 2);
+    if (s !== null) {
+      setRet({ rawHours: s.retention.raw_hours, oneMinDays: s.retention.minute_days, tenMinDays: s.retention.decaminute_days });
+    }
+    setError(null);
   };
 
-  const saveAll = async (): Promise<void> => {
+  const save = async (): Promise<void> => {
+    if (!intervalOk || !retentionValid || intervalS === null) return;
     setSaving(true);
     setError(null);
     const patch: SettingsPatch = {
       appearance: { theme: srvTheme, density: srvDensity },
-      sampling_interval_s: interval ?? 2,
+      sampling_interval_s: intervalS,
       retention: {
-        raw_hours: retention.raw_hours,
-        minute_days: retention.minute_days,
-        decaminute_days: retention.decaminue,
+        raw_hours: ret.rawHours,
+        minute_days: ret.oneMinDays,
+        decaminute_days: ret.tenMinDays,
       },
     };
     try {
@@ -73,125 +93,144 @@ export function GeneralSection({ gate }: { gate: SettingsGate }) {
     }
   };
 
+  const locallyDirty = srvTheme !== uiTheme || srvDensity !== uiDensity;
+
   return (
-    <PanelShell>
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="flex flex-col gap-3">
-          <FieldLabel>Appearance</FieldLabel>
-          <Select
-            label="Theme"
-            value={srvTheme}
-            onChange={(e) => setSrvTheme(e.currentTarget.value as ThemeChoice)}
-          >
-            <option value="dark">dark</option>
-            <option value="light">light</option>
-            <option value="system">system</option>
-          </Select>
-          <Select
-            label="Density"
-            value={srvDensity}
-            onChange={(e) => setSrvDensity(e.currentTarget.value as Density)}
-          >
-            <option value="comfortable">comfortable</option>
-            <option value="compact">compact</option>
-          </Select>
-          {duoDirty && (
-            <FieldMsg tone="hint">
-              local appearance differs — “apply locally” swaps tokens now; “save” mirrors to the controller.
-            </FieldMsg>
-          )}
+    <SectionWrap
+      id="general"
+      title="General"
+      sub="appearance · sampling cadence · retention"
+      right={
+        <Chip
+          variant="warn"
+          title="the sampler re-reads interval + retention on its next connect; a server restart re-uses the db, so values survive"
+        >
+          applies on next connect
+        </Chip>
+      }
+    >
+      <div className="grid gap-5 lg:grid-cols-2">
+        <div className="sd-panel flex flex-col gap-3 p-4">
+          <div className="sd-monolabel">appearance</div>
           <div className="flex gap-2">
-            {duoDirty && (
-              <Chip variant="accent" title="writes localStorage 'sparkdeck.ui' instantly">
-                <button
-                  type="button"
-                  className="cursor-pointer underline decoration-dotted"
-                  onClick={applyUiNow}
-                >
-                  apply locally
-                </button>
-              </Chip>
-            )}
+            {(['dark', 'light', 'system'] as const).map((t) => (
+              <Choice key={t} active={srvTheme === t} onClick={() => setSrvTheme(t)}>{t}</Choice>
+            ))}
           </div>
+          <div className="flex gap-2">
+            {(['comfortable', 'compact'] as const).map((d) => (
+              <Choice key={d} active={srvDensity === d} onClick={() => setSrvDensity(d)}>{d}</Choice>
+            ))}
+          </div>
+          {locallyDirty && (
+            <>
+              <FieldMsg tone="hint">
+                choice differs from the live store — “apply locally” swaps tokens now; “Save” mirrors it into the
+                controller.
+              </FieldMsg>
+              <div>
+                <Chip variant="accent">
+                  <button
+                    type="button"
+                    className="cursor-pointer underline decoration-dotted"
+                    onClick={() => {
+                      setTheme(srvTheme);
+                      setDensity(srvDensity);
+                      toast.info('Appearance applied locally.');
+                    }}
+                  >
+                    apply locally
+                  </button>
+                </Chip>
+              </div>
+            </>
+          )}
         </div>
 
-        <div className="flex flex-col gap-3">
-          <FieldLabel>Sampler & retention</FieldLabel>
+        <div className="sd-panel flex flex-col gap-3 p-4">
+          <div className="sd-monolabel">sampler & retention</div>
           <NumField
             label="Sampling interval"
-            unit="seconds · 1–10"
-            value={interval}
+            value={intervalS}
+            unit="seconds (1–10)"
             min={1}
             max={10}
             onChange={setIntervalS}
             required
-            hint="collector tick; tighter = denser raw ring, shorter history"
+            hint="collector tick — tighter means a denser raw ring, a shorter live history"
           />
           <div className="grid grid-cols-3 gap-2">
             <NumField
               label="Raw keep"
+              value={ret.rawHours}
               unit="hours"
               integer
               min={1}
               max={48}
-              value={retention.raw_hours}
-              onChange={(v) => setRetention((r) => ({ ...r, raw_hours: v ?? 0 }))}
+              onChange={setRetentionKey('rawHours')}
               required
             />
             <NumField
               label="1m rollups"
-              unit="days"
-              integer
-              min={1}
-              max={90}
-              value={retention.minute_days}
-              onChange={(v) => setRetention((r) => ({ ...r, minute_days: v ?? 0 }))}
-              required
-            />
-            <NumField
-              label="10m rollups"
+              value={ret.oneMinDays}
               unit="days"
               integer
               min={1}
               max={365}
-              value={retention.decaminue}
-              onChange={(v) => setRetention((r) => ({ ...r, decaminue: v ?? 0 }))}
+              onChange={setRetentionKey('oneMinDays')}
+              required
+            />
+            <NumField
+              label="10m rollups"
+              value={ret.tenMinDays}
+              unit="days"
+              integer
+              min={1}
+              max={365}
+              onChange={setRetentionKey('tenMinDays')}
               required
             />
           </div>
-          <Chip variant="warn">
-            applies on next connect — a server restart re-uses the db, values survive
-          </Chip>
-          <Toggle
-            checked={useToasts.getState().items.length > 0}
-            label={<span className="text-2xs text-low">toast preview of retention changes is not needed</span>}
-            disabled
-          />
         </div>
       </div>
 
       <DirtySave
-        dirty={duoDirty || (s !== null && (interval !== s.sampling_interval_s || JSON.stringify(retention) !== JSON.stringify(s.retention)))}
-        valid={poll && retention.raw_hours > 0 && retention.minute_days > 0 && retention.decaminue > 0}
+        dirty={dirty}
+        valid={intervalOk && retentionValid}
         saving={saving}
         error={error}
-        onSave={() => void saveAll()}
-        onReset={() => {
-          if (s !== null) {
-            setSrvTheme(s.appearance.theme);
-            setSrvDensity(s.appearance.density);
-            setIntervalS(s.sampling_interval_s);
-            setRetention({ ...s.retention });
-          }
-        }}
+        onSave={() => void save()}
+        onReset={reset}
         saveLabel="Save general"
       />
-    </PanelShell>
+    </SectionWrap>
   );
 }
 
-export function PanelShell({ children }: { children: React.ReactNode }) {
-  return <section className="sd-panel p-4">{children}</section>;
+function Choice({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={active}
+      aria-pressed={active}
+      className={cn(
+        'h-9 min-w-0 flex-1 cursor-pointer rounded-inner border px-3 text-sm transition-colors duration-fast',
+        'disabled:cursor-default disabled:opacity-90',
+        active
+          ? 'border-accent/50 bg-accent/10 font-semibold text-accent'
+          : 'border-stroke bg-bg2 text-mid hover:border-stroke-strong hover:text-hi',
+      )}
+    >
+      {children}
+    </button>
+  );
 }
-
-export type { AppSettings };

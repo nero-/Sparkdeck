@@ -17,23 +17,19 @@ import {
   Play,
   Power,
   ServerCrash,
-  Thermometer,
   Wrench,
 } from 'lucide-react';
 import { cn } from '../../lib/cn';
 import { PageHeader } from '../../shell/PageShell';
 import {
-  Bar,
   Btn,
   Chip,
   ConfirmDialog,
   Empty,
-  Gauge,
   Panel,
   Sparkline,
   Spinner,
   StatusDot,
-  connDot,
   healthDot,
   toast,
   Tip,
@@ -43,8 +39,8 @@ import { useClusters, useSystemInfo } from '../../api/queries';
 import { useSettings } from '../../api/monitoring';
 import { useActiveOps, useOps, useRecentOps } from '../../stores/ops';
 import { useEventsRing, useLive, useLiveNodes, useServiceByCluster } from '../../stores/live';
-import { useNodeRings } from '../../stores/nodeRings';
-import { Skel, fmtCtx, kvMultiplier, parseNum, pickSample } from '../../components/monShared';
+import { NodeCard, type NodeAlerts } from '../../components/nodeCard';
+import { Skel, fmtCtx, kvMultiplier } from '../../components/monShared';
 import { fmtClock, fmtDuration, fmtGiB, fmtNum } from '../../lib/format';
 import type {
   ClusterTopology,
@@ -54,27 +50,6 @@ import type {
   ProfileDef,
   ServiceState,
 } from '../../api/types';
-
-/** Sparkline ring length — mirrors stores/nodeRings.ts RING_CAP. */
-const RING_POINTS = 60;
-
-interface MemAlerts {
-  mem_warn_gib: number;
-  mem_crit_gib: number;
-  gpu_temp_warn_c: number;
-  gpu_temp_crit_c: number;
-}
-
-function alertsOf(alerts: MemAlerts | null): Required<MemAlerts> {
-  return (
-    alerts ?? {
-      mem_warn_gib: 118.5,
-      mem_crit_gib: 120.5,
-      gpu_temp_warn_c: 85,
-      gpu_temp_crit_c: 95,
-    }
-  );
-}
 
 function cardAccent(cluster: ClusterTopology): string {
   const c = cluster.accent_color;
@@ -273,7 +248,7 @@ function ClusterCard({
   cluster: ClusterTopology;
   nodeStateById: Map<ID, LiveNodeState>;
   service: ServiceState | undefined;
-  alerts: MemAlerts | null;
+  alerts: NodeAlerts | null;
 }) {
   const accent = cardAccent(cluster);
   const online = cluster.nodes.filter((n) => nodeStateById.get(n.id)?.state === 'online').length;
@@ -442,7 +417,7 @@ function ClusterCard({
       {/* per-node mini-cards */}
       <div className="mt-3 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
         {cluster.nodes.map((n) => (
-          <NodeMiniCard key={n.id} node={n} accent={accent} state={nodeStateById.get(n.id)} alerts={alertsOf(alerts)} />
+          <NodeCard key={n.id} node={n} accent={accent} state={nodeStateById.get(n.id)} alerts={alerts} />
         ))}
         {cluster.nodes.length === 0 && (
           <div className="col-span-full py-4 text-center text-xs text-low">No nodes on this cluster yet.</div>
@@ -622,139 +597,6 @@ function StartMenu({
         </div>
       )}
     </div>
-  );
-}
-
-/* =============================================================================
-   Per-node mini-card
-   ========================================================================== */
-
-function NodeMiniCard({
-  node,
-  accent,
-  state,
-  alerts,
-}: {
-  node: ClusterTopology['nodes'][number];
-  accent: string;
-  state: LiveNodeState | undefined;
-  alerts: Required<MemAlerts>;
-}) {
-  const netRxId = useMemo(() => {
-    const interest = node.interest_ifaces[0];
-    if (interest !== undefined && interest !== '') return `net.${interest}.rx_kbps`;
-    return null;
-  }, [node.interest_ifaces]);
-
-  const rings = useNodeRings(node.id, netRxId !== null ? [netRxId] : []);
-  const rxRing = rings[0];
-
-  return (
-    <Link
-      to={`/nodes/${encodeURIComponent(node.id)}`}
-      title={`Open node dashboard — ${node.name}`}
-      className="sd-raised group flex min-w-0 cursor-pointer flex-col gap-2.5 p-3 transition-colors duration-fast hover:border-stroke-strong"
-    >
-      <div className="flex min-w-0 items-center gap-2">
-        <StatusDot state={connDot(state?.state ?? 'unknown')} size={8} title={`conn ${state?.state ?? 'unknown'}`} />
-        <span className="truncate text-xs font-semibold text-hi group-hover:underline">{node.name}</span>
-        <Chip
-          variant={node.role === 'head' ? 'accent' : 'neutral'}
-          color={node.role === 'head' ? accent : undefined}
-          className="font-mono"
-          title={`role ${node.role} · env_rank ${node.env_rank}`}
-        >
-          {node.role === 'head' ? 'head' : `w${node.env_rank}`}
-        </Chip>
-        <span className="ml-auto min-w-0 truncate font-mono text-2xs text-low" title={`addr_used — the address the collector reached this node on`}>
-          {state?.addr_used ?? '—'}
-        </span>
-      </div>
-
-      <div className="flex items-center gap-3">
-        <GpuGaugeMini nodeId={node.id} accent={accent} />
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <MemRowMini nodeId={node.id} alerts={alerts} />
-          <div className="flex min-w-0 items-center gap-2">
-            <TempChipMini nodeId={node.id} alerts={alerts} />
-            {netRxId !== null && (
-              <Tip text={`${netRxId} — last ${RING_POINTS} live samples`}>
-                <Sparkline
-                  values={rxRing?.v ?? []}
-                  color={accent}
-                  width={90}
-                  height={22}
-                  title={`net rx kbit/s — last ${RING_POINTS} live samples`}
-                  className="ml-auto shrink-0"
-                />
-              </Tip>
-            )}
-          </div>
-        </div>
-      </div>
-    </Link>
-  );
-}
-
-function GpuGaugeMini({ nodeId, accent }: { nodeId: ID; accent: string }): ReactNode {
-  const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const util = parseNum(sample?.series['gpu.util']);
-  return (
-    <Gauge
-      value={util}
-      size={56}
-      unit="%"
-      color={accent}
-      className="shrink-0"
-      title={`gpu.util — ${util === null ? 'no sample yet' : `${util.toFixed(1)}%`} · node ${nodeId}`}
-    />
-  );
-}
-
-function MemRowMini({ nodeId, alerts }: { nodeId: ID; alerts: Required<MemAlerts> }) {
-  const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const used = parseNum(sample?.series['mem.used_gib']);
-  const { mem_warn_gib: warn, mem_crit_gib: crit } = alerts;
-  const max = Math.max(crit, used !== null ? used + 2 : 0);
-  const valueColor =
-    used === null ? 'var(--sd-low)' : used >= crit ? 'var(--sd-crit)' : used >= warn ? 'var(--sd-warn)' : 'var(--sd-mid)';
-  return (
-    <div className="min-w-0" title={`mem.used_gib — ${used === null ? 'no sample' : fmtGiB(used)}`}>
-      <div className="mb-0.5 flex items-baseline justify-between gap-2">
-        <span className="sd-monolabel">mem</span>
-        <span className="sd-num font-mono text-2xs" style={{ color: valueColor }}>
-          {fmtGiB(used)}
-        </span>
-      </div>
-      <Bar
-        value={used}
-        max={max}
-        horizon={max > 0 ? warn / max : null}
-        thresholds={[
-          { at: warn, color: '#FBBF24' },
-          { at: crit, color: '#F87171' },
-        ]}
-        title={`mem used · ${fmtGiB(warn)} warn horizon · ${fmtGiB(crit)} crit`}
-        height={5}
-      />
-    </div>
-  );
-}
-
-function TempChipMini({ nodeId, alerts }: { nodeId: ID; alerts: Required<MemAlerts> }) {
-  const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const temp = pickSample(sample?.series, 'gpu.temp');
-  const { gpu_temp_warn_c: warn, gpu_temp_crit_c: crit } = alerts;
-  const variant = temp === null ? 'neutral' : temp >= crit ? 'crit' : temp >= warn ? 'warn' : 'neutral';
-  return (
-    <Chip
-      variant={variant}
-      className="shrink-0"
-      title={`gpu.temp — ${temp === null ? 'no sample' : `${temp.toFixed(1)}°C (warn ${warn}°, crit ${crit}°)`}`}
-    >
-      <Thermometer size={11} aria-hidden />
-      <span className="sd-num font-mono">{temp === null ? '—°' : `${(Math.round(temp * 10) / 10).toFixed(1)}°`}</span>
-    </Chip>
   );
 }
 
