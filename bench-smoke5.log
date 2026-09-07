@@ -1,0 +1,11 @@
+result path: /home/kal/Agent/Apps/sparkdeck/.tmpdata/runtime/bench/50e234f4d1d2/sparkdeck-smoke-50e234f4d1d2.json
+bench wall 47.8s — state: ok exit: 0
+error: None
+engine: vllm server: http://192.168.50.90:8000 spec_avg: 2.457
+best: {'ctx': 0, 'conc': 1, 'tps': 29.15476057560304} | c1: {'ctx': 0, 'conc': 1, 'tps': 29.15476057560304}
+prefill: [{'ctx': 8192, 'tok_per_sec': 1690.0, 'ttft_s': 4.85, 'prompt_tokens': 8198}]
+  cell: {'ctx': 0, 'conc': 1, 'tps': 29.15476057560304}
+report: {'rc': 0, 'path': '/home/kal/Agent/Apps/sparkdeck/.tmpdata/runtime/bench/run-17-sparkdeck-smoke.md', 'repo_path': None}
+jobs stored: [('50e234f4d1d2', 'ok')]
+repo history: [('dualspark', {'ctx': 16384, 'conc': 1, 'tps': 32.89497966947744}), ('regressiontest_3', {'ctx': 65536, 'conc': 1, 'tps': 33.08686087856757}), ('regressiontest_2', {'ctx': 32768, 'conc': 1, 'tps': 32.00207803188452})]
+DONE

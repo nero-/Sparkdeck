@@ -1,0 +1,14 @@
+[Unit]
+Description=Sparkdeck — DGX Spark / GX10 cluster controller console
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/Agent/Apps/sparkdeck/scripts/run.sh --host 127.0.0.1 --port 8936
+# leave SPARKDECK_MOCK empty for the real cluster world
+Environment=SPARKDECK_MOCK=0
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

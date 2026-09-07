@@ -1,0 +1,337 @@
+/* ============================================================================
+   Sparkdeck — design system entry (Tailwind CSS v4)
+   Dark-first operator console. Tokens are plain CSS custom properties
+   (--sd-*) mapped into Tailwind's theme, so a light theme later is a token
+   swap under [data-theme="light"] — no component changes.
+   See docs/DESIGN.md.
+   ========================================================================= */
+
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+   1. Raw palette. Dark is the default (no attribute needed);
+      [data-theme="light"] re-points the same names.
+   --------------------------------------------------------------------------- */
+
+:root,
+:root[data-theme='dark'] {
+  --sd-bg0: #0a0c10;
+  --sd-bg1: #10131a;
+  --sd-bg2: #151923;
+  --sd-stroke: rgb(255 255 255 / 0.07);
+  --sd-stroke-strong: rgb(255 255 255 / 0.14);
+  --sd-hi: #e7ecf3;
+  --sd-mid: #9aa4b2;
+  --sd-low: #5b6572;
+  --sd-accent: #5eb1ff;
+  --sd-accent-ink: #071018; /* text on accent fills */
+  --sd-ok: #4ade80;
+  --sd-warn: #fbbf24;
+  --sd-crit: #f87171;
+
+  /* elevation + chrome */
+  --sd-shadow: rgb(0 0 0 / 0.4);
+  --sd-hi-inset: rgb(255 255 255 / 0.04);
+  --sd-overlay: rgb(4 6 10 / 0.72); /* modal scrim */
+  --sd-scrollbar: rgb(255 255 255 / 0.14);
+
+  /* chart chrome (read by echarts at build time via ds/tokens.ts) */
+  --sd-chart-grid: rgb(255 255 255 / 0.05);
+  --sd-chart-axis: rgb(154 164 178 / 0.9);
+  --sd-chart-crosshair: rgb(255 255 255 / 0.22);
+  --sd-chart-area: rgb(255 255 255 / 0.035);
+  --sd-tooltip-bg: rgb(21 25 35 / 0.97);
+
+  /* terminal (true 256-color palette is generated in ds/terminal.tsx;
+     these are the chrome tokens) */
+  --sd-term-bg: rgb(0 0 0 / 0.28);
+  --sd-term-gutter: rgb(255 255 255 / 0.035);
+
+  /* layout rhythm (density-switchable) */
+  --sd-page-pad: 24px;
+  --sd-card-gap: 12px;
+
+  /* motion curve is a raw var too (used by plain-CSS components) */
+  --ease-out-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+:root[data-theme='light'] {
+  --sd-bg0: #f4f5f7;
+  --sd-bg1: #ffffff;
+  --sd-bg2: #fafafc;
+  --sd-stroke: rgb(15 23 42 / 0.1);
+  --sd-stroke-strong: rgb(15 23 42 / 0.18);
+  --sd-hi: #0b1220;
+  --sd-mid: #475569;
+  --sd-low: #7c8ba1;
+  --sd-accent: #1668dc;
+  --sd-accent-ink: #ffffff;
+  --sd-ok: #16a34a;
+  --sd-warn: #d97706;
+  --sd-crit: #dc2626;
+
+  --sd-shadow: rgb(15 23 42 / 0.12);
+  --sd-hi-inset: rgb(255 255 255 / 0.6);
+  --sd-overlay: rgb(15 23 42 / 0.4);
+  --sd-scrollbar: rgb(15 23 42 / 0.22);
+
+  --sd-chart-grid: rgb(15 23 42 / 0.07);
+  --sd-chart-axis: rgb(71 85 105 / 0.9);
+  --sd-chart-crosshair: rgb(15 23 42 / 0.3);
+  --sd-chart-area: rgb(15 23 42 / 0.045);
+  --sd-tooltip-bg: rgb(255 255 255 / 0.98);
+
+  --sd-term-bg: rgb(15 23 42 / 0.05);
+  --sd-term-gutter: rgb(15 23 42 / 0.035);
+
+  /* density rhythm is theme-independent */
+}
+
+:root[data-density='compact'] {
+  --sd-page-pad: 16px;
+  --sd-card-gap: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   2. Tailwind theme mapping. `inline` bakes var(--sd-*) straight into the
+      generated utilities so theme attributes resolve per-element.
+   --------------------------------------------------------------------------- */
+
+@theme inline {
+  /* surfaces */
+  --color-bg0: var(--sd-bg0);
+  --color-bg1: var(--sd-bg1);
+  --color-bg2: var(--sd-bg2);
+
+  /* chrome */
+  --color-stroke: var(--sd-stroke);
+  --color-stroke-strong: var(--sd-stroke-strong);
+  --color-scrim: var(--sd-overlay);
+
+  /* text */
+  --color-hi: var(--sd-hi);
+  --color-mid: var(--sd-mid);
+  --color-low: var(--sd-low);
+
+  /* semantics */
+  --color-accent: var(--sd-accent);
+  --color-accent-ink: var(--sd-accent-ink);
+  --color-ok: var(--sd-ok);
+  --color-warn: var(--sd-warn);
+  --color-crit: var(--sd-crit);
+
+  /* type */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', ui-monospace,
+    'SFMono-Regular', Menlo, Consolas, monospace;
+
+  --text-2xs: 11px;
+  --text-2xs--line-height: 1.45;
+  --text-xs: 12px;
+  --text-xs--line-height: 1.4;
+  --text-sm: 13px;
+  --text-sm--line-height: 1.45;
+  --text-base: 15px;
+  --text-base--line-height: 1.5;
+  --text-lg: 18px;
+  --text-lg--line-height: 1.35;
+  --text-xl: 24px;
+  --text-xl--line-height: 1.25;
+
+  /* shape: card 10px, inner elements 6px. Status dots stay round (the only
+     exception per DESIGN.md). */
+  --radius-card: 10px;
+  --radius-inner: 6px;
+
+  /* motion: 120–180ms ease-out */
+  --duration-fast: 120ms;
+  --duration-med: 150ms;
+  --duration-slow: 180ms;
+  --ease-out-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* default border color = stroke (v4 defaults to currentColor otherwise) */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--sd-stroke);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--sd-bg0);
+    color: var(--sd-hi);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden; /* the shell is the scroll container */
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--sd-accent) 34%, transparent);
+  }
+
+  /* visible focus for keyboard users only — 2px accent outline, offset */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--sd-accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--sd-scrollbar);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--sd-stroke-strong);
+    background-clip: content-box;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--sd-scrollbar) transparent;
+  }
+
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   3. Motion
+   --------------------------------------------------------------------------- */
+
+@keyframes sd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes sd-pulse-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.75;
+  }
+  70% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+@keyframes sd-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   4. Component primitives that need real CSS (shadows, inset highlight)
+   --------------------------------------------------------------------------- */
+
+@layer components {
+  /* Panel: bg1 card, 1px stroke, subtle drop + thin 1px inner top highlight */
+  .sd-panel {
+    background: var(--sd-bg1);
+    border: 1px solid var(--sd-stroke);
+    border-radius: var(--radius-card);
+    box-shadow:
+      0 1px 2px var(--sd-shadow),
+      inset 0 1px 0 var(--sd-hi-inset);
+  }
+
+  /* raised variant (bg2) for inputs, dropdowns, chips-in-charts */
+  .sd-raised {
+    background: var(--sd-bg2);
+    border: 1px solid var(--sd-stroke);
+    border-radius: var(--radius-inner);
+    box-shadow:
+      0 1px 2px var(--sd-shadow),
+      inset 0 1px 0 var(--sd-hi-inset);
+  }
+
+  /* mono metric label: 11px uppercase, tracking 0.08em */
+  .sd-monolabel {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.2;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sd-mid);
+    font-weight: 500;
+  }
+
+  /* numerals never jitter */
+  .sd-num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* StatusDot loss-of-conn pulse (hollow dot + expanding ring) */
+  .sd-dot-pulse {
+    position: relative;
+  }
+  .sd-dot-pulse::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 9999px;
+    border: 1.5px solid currentColor;
+    animation: sd-pulse-ring 1.6s var(--ease-out-soft) infinite;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   5. Runtime helpers
+   --------------------------------------------------------------------------- */
+
+/* inline accent for cluster-specific theming: set on any wrapper element */
+.sd-cluster-accent {
+  color: var(--cluster-accent, var(--sd-accent));
+}
+
+.sd-page-pad {
+  padding: var(--sd-page-pad);
+}
+.sd-card-gap {
+  gap: var(--sd-card-gap);
+}

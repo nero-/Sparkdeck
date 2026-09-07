@@ -1,0 +1,10 @@
+result path: /home/kal/Agent/Apps/sparkdeck/.tmpdata/runtime/bench/8b5663a97612/sparkdeck-smoke-8b5663a97612.json
+bench wall 0.0s — state: error exit: -1
+error: ValueError: text must be False
+engine: None server: None spec_avg: None
+best: None | c1: None
+prefill: None
+report: {'rc': 1, 'error': 'no result file yet'}
+jobs stored: [('8b5663a97612', 'error')]
+repo history: [('dualspark', {'ctx': 16384, 'conc': 1, 'tps': 32.89497966947744}), ('regressiontest_3', {'ctx': 65536, 'conc': 1, 'tps': 33.08686087856757}), ('regressiontest_2', {'ctx': 32768, 'conc': 1, 'tps': 32.00207803188452})]
+DONE

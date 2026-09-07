@@ -1,0 +1,30 @@
+[project]
+name = "sparkdeck"
+version = "0.1.0"
+description = "Unified cluster controller & operator console for DGX Spark / GX10 pairs serving GLM-5.3-Flash"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "asyncssh>=2.17",
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "httpx"]
+
+[project.scripts]
+sparkdeck = "sparkdeck.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["sparkdeck*"]
+exclude = ["sparkdeck.mock.*tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

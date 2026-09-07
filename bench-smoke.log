@@ -1,0 +1,8 @@
+bench status: {'bench_repo_dir': '/home/kal/Agent/Builds/glm53-flash-dgx-spark-tp2/bench', 'tool_present': True, 'venv_python': '/home/kal/Agent/Builds/glm53-flash-dgx-spark-tp2/bench/.venv/bin/python', 'venv_deps_ok': True}
+argv tail: --resume --output .tmpdata/runtime/bench/2b0e64d1a015/sparkdeck-smoke-2b0e64d1a015.json --prefill-contexts 8k
+job state: error exit: -1
+engine: None | server_url: None | spec avg: None
+best: None | c1: None
+prefill: None
+report: {'rc': 1, 'error': 'no result file yet'}
+DONE
