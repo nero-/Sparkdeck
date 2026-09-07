@@ -129,8 +129,8 @@ rollups.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/events?limit&level&cluster_id&kind&since` | event feed |
-| POST | `/api/events/ack` | `{ids:[...]}` or `{all:true}` |
+| GET | `/api/events?limit&level&cluster_id&kind&since&unacked_only` | event feed (level = single value; chain filters client-side) |
+| POST | `/api/events/ack` | `{ids:[...]}` or `{all:true}` → `{ok, count}`; ack returns `{ok}` |
 | GET | `/api/ops?limit&kind&cluster_id` | op audit |
 | GET | `/api/ops/{id}` | op detail incl. step log |
 | POST | `/api/ops/{id}/cancel` | best-effort cancel |

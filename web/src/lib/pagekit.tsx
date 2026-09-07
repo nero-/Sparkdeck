@@ -56,7 +56,6 @@ export function NumField({
   onChange,
   min,
   max,
-  step = 1,
   unit,
   integer = false,
   hint,
@@ -70,7 +69,6 @@ export function NumField({
   onChange: (v: number | null) => void;
   min?: number;
   max?: number;
-  step?: number;
   unit?: string;
   integer?: boolean;
   hint?: string;
@@ -273,7 +271,10 @@ export const OP_CHIP_VARIANT: Record<OpRecord['state'], 'neutral' | 'ok' | 'warn
   cancelled: 'warn',
 };
 
-export const OP_STEP_VARIANT: Record<OpRecord['steps'][number]['state'], 'neutral' | 'ok' | 'warn' | 'crit'> = {
+export const OP_STEP_VARIANT: Record<
+  OpRecord['steps'][number]['state'],
+  'neutral' | 'ok' | 'warn' | 'crit' | 'accent'
+> = {
   pending: 'neutral',
   running: 'accent',
   ok: 'ok',

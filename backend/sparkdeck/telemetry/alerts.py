@@ -4,6 +4,7 @@ prevents duplicates; state transitions edge-trigger.
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import time
 from typing import Callable
 
@@ -72,9 +73,29 @@ class AlertEngine:
              jdumps(ev.data) if ev.data else None),
         )
         self._emit_event(ev)
+        self._maybe_webhook(ev)
         if level == "error":
             self._last_fired[f"k:{kind}"] = time.time()
         return ev
+
+    def _maybe_webhook(self, ev: EventRec) -> None:
+        url = self.settings_ref.settings.alerts.webhook_url
+        if not url:
+            return
+
+        async def _post() -> None:
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=5) as client:
+                    await client.post(url, json=ev.model_dump())
+            except Exception:
+                pass  # webhooks are best-effort; the local store is the record
+
+        try:
+            _asyncio.get_running_loop().create_task(_post())
+        except RuntimeError:
+            pass
 
     async def history(self, limit: int = 200, level: str | None = None,
                       cluster_id: str | None = None, kind: str | None = None,

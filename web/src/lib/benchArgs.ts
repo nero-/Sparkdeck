@@ -89,20 +89,25 @@ export function describeCsv(check: CsvCheck): string {
 }
 
 /* ---------------------------------------------------------------------------
-   Argv mirror — ESTIMATE. Mirrors the typical build order from the pinned
-   POST body (economy: flags before values, extra passthrough last). The
-   truth is the `argv` the server returns once the job is submitted.
+   Argv mirror — ESTIMATE, order mirrored 1:1 from the backend builder
+   (backend/sparkdeck/bench/runner.py#_argv):
+   python, tool, --host --port --model, --concurrency --contexts --max-tokens
+   --duration, --display-mode plain --no-hw-monitor --resume --output, then
+   prefill-contexts, kv-budget, coding-peak, extra passthrough last.
+   The truth after submit is the `argv` of the POST /api/bench/jobs response.
    --------------------------------------------------------------------------- */
 
 export interface ArgvMirrorInput {
-  /** bench tool path from GET /api/bench/config (null → placeholder) */
-  tool: string | null;
   /** venv python from GET /api/bench/config (null → placeholder) */
   venvPython: string | null;
+  /** bench tool path (null → placeholder; config only exposes tool_present) */
+  tool: string | null;
   host: string;
   port: number;
   model: string;
   label: string | null;
+  /** backend-minted job id holder — unknown before submit */
+  outputHint?: string;
   kvBudget: number | null;
   args: {
     concurrency: string;
@@ -120,21 +125,22 @@ export interface ArgvMirrorInput {
 export function mirrorArgv(input: ArgvMirrorInput): string[] {
   const argv: string[] = [
     input.venvPython ?? '<venv python>',
-    input.tool ?? '<bench tool>',
+    input.tool ?? 'llm_decode_bench.py',
     '--host', input.host.trim() || '<host>',
     '--port', String(input.port),
     '--model', input.model.trim() || '<model>',
+    '--concurrency', input.args.concurrency.trim() || '<concurrency>',
+    '--contexts', input.args.contexts.trim() || '<contexts>',
+    '--max-tokens', String(input.args.max_tokens),
+    '--duration', String(input.args.duration),
+    '--display-mode', 'plain',
+    '--no-hw-monitor',
+    '--resume',
+    '--output', input.outputHint ?? '<app-data>/bench/job-id/<label>-<id>.json',
   ];
-  if (input.label !== null && input.label.trim() !== '') {
-    argv.push('--label', input.label.trim());
-  }
-  argv.push('--concurrency', input.args.concurrency.trim() || '<concurrency>');
-  if (input.args.contexts.trim() !== '') argv.push('--context', input.args.contexts.trim());
   if (input.args.prefill_contexts.trim() !== '') {
     argv.push('--prefill-contexts', input.args.prefill_contexts.trim());
   }
-  argv.push('--max-tokens', String(input.args.max_tokens));
-  argv.push('--duration', String(input.args.duration));
   if (input.kvBudget !== null && Number.isFinite(input.kvBudget) && input.kvBudget > 0) {
     argv.push('--kv-budget', String(input.kvBudget));
   }

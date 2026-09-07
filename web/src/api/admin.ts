@@ -1,38 +1,37 @@
 /* ============================================================================
    api/admin — thin typed helpers for the settings / bench / images console.
 
-   Everything rides the pinned contract in `src/api/types.ts` (docs/API.md
-   mirror). Where the live backend drifts from docs/API.md (response envelopes,
-   extra required fields, moved endpoints), the wizardry is normalized HERE so
-   pages never see raw unknowns; every normalization carries a `// DRIFT:` or
-   `// GAP:` tag so the report can account for it.
+   Rides the pinned contract in `src/api/types.ts` (docs/API.md mirror).
+   Where the live backend drifts from docs/API.md (response envelopes, extra
+   required fields, moved endpoints), normalization lives HERE so pages never
+   see raw unknowns; each normalization carries a `// DRIFT:` or `// GAP:` tag
+   the report can cite.
 
-   Drifts encoded (from backend/sparkdeck/api/routes.py + bench/runner.py):
-   - GET /api/images/{nodeId}        → `{images: ImageInfo[], state}` (docs: bare array)
-   - GET /api/images/envs/{cluster}  → `{envs: EnvImageRow[]}`        (docs: bare array)
+   Drifts encoded (verified against backend/sparkdeck/api/routes.py + bench/runner.py):
+   - GET /api/images/{nodeId}        → `{images: ImageInfo[], state}`  (docs: bare array)
+   - GET /api/images/envs/{cluster}  → `{envs: EnvImageRow[]}`         (docs: bare array)
    - GET /api/images/builds/{node}   → `{files: [{file,label}], state}` (docs: bare array;
-                                        rows carry NO node_id though types.ts wants one)
-   - POST /api/images/copies|builds  → require `cluster_id`            (docs omit it)
-   - node collector deploy           → POST /api/nodes/{id}/actions/collector
+                                       rows carry NO node_id though types.ts wants one)
+   - POST /api/images/copies|builds  → require `cluster_id`             (docs omit it)
+   - collector deploy                → POST /api/nodes/{id}/actions/collector
                                        (docs/API.md says actions/deploy-collector)
    - POST /api/nodes/{id}/test       → `{ok, used_addr, attempts:[{addr, ok, error}],
                                        collector, versions, lan_addr, unverified}`
                                        (docs describe it, shape not pinned; no latency field)
    - GET /api/bench/config           → `{bench_repo_dir, tool_present, venv_python,
                                        venv_deps_ok, write_repo_runs, defaults:{label, args}}`
-   - PATCH /api/bench/config         → body IS a bench-settings slice
-                                       (`{bench:{…}}`-wrapped server-side; client sends
-                                       {bench_repo_dir?, write_repo_runs?, defaults?}
-                                       and defaults carries `{label, args}`)
+   - PATCH /api/bench/config         → partial-capable; defaults is `{label, args}`
    - POST /api/bench/bootstrap-venv  → `{rc, log}` (synchronous, NOT an op)
    - POST /api/bench/jobs            → `{job_id, argv: string[]}`
-   - GET  /api/bench/jobs/{id}?tail→ job dump + `log_tail: string[]` (WS uses `tail`,
+   - GET  /api/bench/jobs/{id}?tail  → job dump + `log_tail: string[]` (WS uses `tail`,
                                        REST uses `log_tail`)
-   - POST /api/bench/jobs/{id}/report→ `{rc, path, repo_path?}` or `{rc:1, error}`
+   - POST /api/bench/jobs/{id}/report→ `{rc, path, repo_path?}` | `{rc:1, error}`
    - cluster PATCH drops `profiles` (apply_patch excludes them) → profile edits
-     verify-and-fallback to POST /api/settings/import (bulk upsert, never deletes).
-   - POST /api/nodes does NOT exist → add-node rides the import upsert as fallback.
+     PATCH-then-verify, then fall back to POST /api/settings/import (bulk
+     upsert, never deletes) when the patch is a silent no-op.
+   - POST /api/nodes does NOT exist → add-node rides the import upsert.
    - GET /api/settings/export → `{topology: ClusterTopology[], settings}`.
+   - POST /api/settings/import exists in backend (routes.py), missing from docs.
    ========================================================================= */
 
 import { api } from './client';
@@ -41,7 +40,6 @@ import type {
   BenchArgs,
   BenchHistoryRow,
   BenchJob,
-  BuildEnvFile,
   ClusterConfig,
   ClusterControl,
   ClusterKind,
@@ -85,7 +83,18 @@ function asRecordList(v: unknown): Record<string, unknown>[] {
   return asList(v).filter(isRecord);
 }
 
-/** Common control-verb response: `{op_id}` (tolerate `id` as a drift). */
+/** True when an ApiClientError says "route not implemented / wrong method". */
+export function isMissingRoute(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as unknown as { status?: unknown; code?: unknown; message?: unknown };
+  const status = typeof e.status === 'number' ? e.status : undefined;
+  const code = typeof e.code === 'string' ? e.code : undefined;
+  const msg = typeof e.message === 'string' ? e.message : '';
+  const notFoundEntity = /node not found|cluster not found|job not found|op not found/.test(msg);
+  return (status === 404 && !notFoundEntity) || status === 405 || code === 'unsupported';
+}
+
+/** `{op_id}` (control verbs; tolerate `id`). */
 export interface OpRef {
   op_id: string | null;
 }
@@ -96,8 +105,7 @@ function asOpRef(v: unknown): OpRef {
 }
 
 /* ---------------------------------------------------------------------------
-   App settings — GET/PATCH /api/settings (PATCH is partial-capable per
-   section: {alerts:{…}, bench:{…}, …}; response is the full merged dump)
+   App settings
    --------------------------------------------------------------------------- */
 
 export type SettingsPatch = {
@@ -115,10 +123,12 @@ export type SettingsPatch = {
   security?: { bind_host?: string; port?: number };
 };
 
+/** GET /api/settings — full dump. */
 export function fetchSettings(): Promise<AppSettings> {
   return api.get<AppSettings>('/api/settings');
 }
 
+/** PATCH /api/settings — partial-capable per section; returns merged dump. */
 export function patchSettings(patch: SettingsPatch): Promise<AppSettings> {
   return api.patch<AppSettings>('/api/settings', patch);
 }
@@ -128,24 +138,45 @@ export interface SettingsExport {
   settings: AppSettings | null;
 }
 
-/** GET /api/settings/export → `{topology, settings}` per backend. */
+/** GET /api/settings/export → `{topology, settings}`. */
 export async function fetchSettingsExport(): Promise<SettingsExport> {
   const raw = await api.get<unknown>('/api/settings/export');
   const r = isRecord(raw) ? raw : {};
-  const topology = asRecordList(r.topology ?? r.clusters) as ClusterTopology[];
+  const topology = asRecordList(r.topology ?? r.clusters) as unknown as ClusterTopology[];
   const rawSettings = r.settings;
   return {
     topology,
     settings:
       isRecord(rawSettings) && typeof rawSettings.sampling_interval_s !== 'undefined'
-        ? (rawSettings as AppSettings)
+        ? (rawSettings as unknown as AppSettings)
         : null,
   };
 }
 
+/**
+ * POST /api/settings/import — bulk upsert `{topology, settings}`.
+ * Present in the backend (routes.py), missing from docs/API.md (gap). When
+ * the endpoint answers as missing, the caller can run the per-cluster
+ * dispatcher (Data section) instead.
+ */
+export async function importTopology(
+  topology: ClusterTopology[],
+): Promise<{ ok: boolean; clusters: number | null; endpointExists: boolean; error: unknown }> {
+  try {
+    const raw = await api.post<unknown>('/api/settings/import', { topology });
+    const r = isRecord(raw) ? raw : {};
+    return { ok: r.ok === true, clusters: asNumber(r.clusters), endpointExists: true, error: null };
+  } catch (err) {
+    if (isMissingRoute(err)) {
+      return { ok: false, clusters: null, endpointExists: false, error: err };
+    }
+    throw err;
+  }
+}
+
 /* ---------------------------------------------------------------------------
    Topology — clusters + nodes
-   (fresh reads: the shared queries cache is 15 s-stale by design for other
+   (fresh reads: the shared queries cache is 15-s-stale by design for other
    pages; the settings console patches and must read its own writes)
    --------------------------------------------------------------------------- */
 
@@ -158,15 +189,13 @@ export type ClusterPatchBody = {
   /** sent whole so a partial-merge backend can't leave stale keys behind */
   control?: ClusterControl;
   /**
-   * GAP(tx2): cluster PATCH drops `profiles` server-side (apply_patch exclude).
-   * We send it anyway (future-proofing) and then verify — `saveProfiles()`
-   * falls back to the bulk `/api/settings/import` upsert when the PATCH is a
-   * silent no-op.
+   * GAP: cluster PATCH drops `profiles` server-side (routes.apply_patch
+   * exclusion). We send it anyway so the same call works on backends that
+   * honor it; saveProfiles() verifies and falls back to the import upsert.
    */
   profiles?: ProfileDef[];
 };
 
-/** POST /api/clusters — model_validated; everything except name has defaults. */
 export interface ClusterCreateInput {
   name: string;
   kind?: ClusterKind;
@@ -196,70 +225,45 @@ export function patchNode(id: ID, body: NodePatchBody): Promise<unknown> {
   return api.patch<unknown>(`/api/nodes/${id}`, body);
 }
 
+/** Short id in the same style the backend mints (`uuid4().hex[:12]`). */
 export function clientNodeId(): string {
   const hex = '0123456789abcdef';
+  const bytes = globalThis.crypto?.getRandomValues?.(new Uint8Array(6)) ?? null;
+  if (bytes === null) return Math.random().toString(16).slice(2, 14).padEnd(12, '0');
   let out = '';
-  const rnd = globalThis.crypto?.getRandomValues?.(new Uint8Array(6));
-  if (rnd !== undefined) {
-    for (const b of rnd) out += hex[b % 16];
-  } else {
-    out = Math.random().toString(16).slice(2, 14).padEnd(12, '0');
-  }
+  for (const b of bytes) out += hex[b % 16];
   return out;
 }
 
+export type NodeCreateVia = 'post-node' | 'import-upsert';
+
 /**
- * GAP: there is no `POST /api/nodes` anywhere in the backend. Add-node is
- * implemented as: try `POST /api/nodes` (future-proofing), and when that's not
- * acceptable, ride the bulk upsert (`POST /api/settings/import` with the
- * cluster's full topology incl. the new node) — upsert, never destructive.
+ * GAP: there is no `POST /api/nodes` anywhere in the backend. Add-node tries
+ * `POST /api/nodes` first (future-proofing) and rides the bulk import upsert
+ * (`POST /api/settings/import` with the cluster topology incl. the new node)
+ * when the route is absent. The node id is client-minted on the upsert path.
  */
-export interface NodeCreateResult {
-  node: NodeConfig | null;
-  via: 'post-node' | 'import-upsert';
-}
-
-function uuidHex12(): string {
-  return clientNodeId();
-}
-
-export async function createNode(
-  cluster: ClusterTopology,
-  node: NodeConfig,
-): Promise<NodeCreateResult> {
+export async function createNode(cluster: ClusterTopology, node: Omit<NodeConfig, 'id'> & { id?: ID }): Promise<{ node: NodeConfig | null; via: NodeCreateVia | null }> {
   try {
     const raw = await api.post<unknown>('/api/nodes', node);
     if (isRecord(raw) && typeof raw.id === 'string') {
       return { node: raw as unknown as NodeConfig, via: 'post-node' };
     }
-  } catch (err) {
-    // fall through to the import upsert
-    const imported = await importTopology([withExtraNode(cluster, node)]);
-    if (imported.ok) {
-      // verify the node actually landed (id is client-assigned for this path)
-      const fresh = await fetchClusters();
-      const cl = fresh.find((c) => c.id === cluster.id);
-      const found = cl?.nodes.find((n) => n.id === node.id);
-      if (found !== undefined) return { node: found, via: 'import-upsert' };
-      const freshErr = new Error('node was accepted by import-upsert but did not appear in the topology');
-      return { node: null, via: 'import-upsert' as const } as unknown as NodeCreateResult extends never ? never : NodeCreateResult | (typeof freshErr extends Error ? { node: null; via: 'import-upsert' } : never);
-    }
-    throw err;
+  } catch {
+    /* route missing / not accepted — ride the import upsert */
   }
-  return { node: null, via: 'post-node' };
-}
-
-function newId(): string {
-  return uuidHex12();
-}
-
-/** Cluster topology copy with one extra node (for the import-upsert fallback). */
-function withExtraNode(cluster: ClusterTopology, node: NodeConfig): ClusterTopology {
-  return { ...cluster, nodes: [...cluster.nodes, node] };
+  const withNew = { ...node, id: node.id ?? clientNodeId() } as NodeConfig;
+  const clusterWithNew: ClusterTopology = { ...cluster, nodes: [...cluster.nodes, withNew] };
+  const res = await importTopology([clusterWithNew]);
+  if (!res.ok && res.endpointExists) throw new Error('add-node failed via import upsert');
+  const fresh = await fetchClusters();
+  const cl = fresh.find((c) => c.id === cluster.id);
+  const found = cl?.nodes.find((n) => n.id === withNew.id) ?? null;
+  return { node: found, via: 'import-upsert' };
 }
 
 /* ---------------------------------------------------------------------------
-   Node test — POST /api/nodes/{id}/test (shape normalized from routes.py)
+   Node test (shape normalized from routes.py node_test)
    --------------------------------------------------------------------------- */
 
 export interface NodeTestAttempt {
@@ -274,10 +278,9 @@ export interface NodeTestReport {
   lan_addr: string | null;
   attempts: NodeTestAttempt[];
   collector: CollectorState;
-  /** server probe lines: python like "Python 3.12.x …"; docker/nvidia "ok"|"missing" */
   python: string | null;
-  docker: string | null;
-  nvidia: string | null;
+  docker: string | null; // "ok" | "missing"
+  nvidia: string | null; // "ok" | "missing"
   unverified: boolean;
   message: string | null;
 }
@@ -291,17 +294,18 @@ export async function testNode(id: ID): Promise<NodeTestReport> {
     error: asString(a.error),
   }));
   const versions = isRecord(r.versions) ? r.versions : {};
+  const collectorRaw = isRecord(r.collector) ? r.collector.state : r.collector;
   return {
     ok: typeof r.ok === 'boolean' ? r.ok : null,
     used_addr: asString(r.used_addr),
     lan_addr: asString(r.lan_addr),
     attempts,
-    collector: normalizeCollectorState(asString(r.collector) ?? (isRecord(r.collector) ? asString(r.collector.state) : null)),
+    collector: normalizeCollectorState(asString(collectorRaw)),
     python: asString(versions.python),
     docker: asString(versions.docker),
     nvidia: asString(versions.nvidia),
     unverified: r.unverified === true,
-    message: asString(r.error),
+    message: asString(r.error) ?? asString(r.message),
   };
 }
 
@@ -319,40 +323,19 @@ function normalizeCollectorState(v: string | null): CollectorState {
 }
 
 /**
- * GAPEXT: docs/API.md lists `POST /api/nodes/{id}/actions/deploy-collector`,
- * but the backend route is `POST /api/nodes/{id}/actions/collector`.
- * We call the implemented path (task wording) and keep the docs name in the
- * report.
+ * GAPEXT: docs/API.md lists `POST /api/nodes/{id}/actions/deploy-collector`;
+ * the implemented route is `.../actions/collector`. Primary = implemented
+ * path, fallback = docs name (future-proofing both directions).
  */
 export async function deployCollector(id: ID): Promise<OpRef> {
   try {
     return asOpRef(await api.post<unknown>(`/api/nodes/${id}/actions/collector`, {}));
   } catch (err) {
-    if (isMissingEndpoint(err)) {
+    if (isMissingRoute(err)) {
       return asOpRef(await api.post<unknown>(`/api/nodes/${id}/actions/deploy-collector`, {}));
     }
     throw err;
   }
-}
-
-function isMissingEndpoint(err: unknown): boolean {
-  if (isRecord2(err)) return false;
-  return true;
-}
-function isRecord2(_: unknown): boolean {
-  return false; /* marker helper — see isMissingRoute below */
-}
-
-/** True when an ApiClientError indicates "route not implemented". */
-export function isMissingRoute(err: unknown): err is { status: number; message: string } {
-  if (typeof err !== 'object' || err === null) return false;
-  const e = err as { status?: unknown; code?: unknown; message?: unknown };
-  const status = typeof e.status === 'number' ? e.status : undefined;
-  const code = typeof e.code === 'string' ? e.code : undefined;
-  return (
-    (status === 404 || status === 405 || code === 'unsupported' || code === 'not_found') &&
-    !(code === 'not_found' && typeof e.message === 'string' && /node not found|cluster not found|job not found|op not found/i.test(e.message))
-  );
 }
 
 /* ---------------------------------------------------------------------------
@@ -361,36 +344,48 @@ export function isMissingRoute(err: unknown): err is { status: number; message: 
 
 export interface NodeImageState {
   images: ImageInfo[];
-  state: string; // online | offline | …
+  state: string; // "online" | "offline" | …
 }
 
 export async function fetchNodeImages(nodeId: ID): Promise<NodeImageState> {
   const raw = await api.get<unknown>(`/api/images/${nodeId}`);
-  const r = isRecord(raw) ? raw : {};
   // DRIFT: backend wraps in {images, state}; tolerate the documented bare array.
-  const images = isRecord(raw)
-    ? (asRecordList(r.images) as ImageInfo[])
-    : (asRecordList(raw) as ImageInfo[]);
-  return {
-    images: images.filter((im) => isRecord(im as unknown) && typeof (im as unknown as ImageInfo).repo_tag === 'string'),
-    state: asString(r.state) ?? 'offline',
-  };
+  const rows = isRecord(raw)
+    ? (asRecordList(raw.images) as unknown[] as Record<string, unknown>[])
+    : asRecordList(raw);
+  const images: ImageInfo[] = [];
+  for (const row of rows) {
+    const repoTag = asString(row.repo_tag);
+    if (repoTag !== null) {
+      images.push({
+        node_id: nodeId,
+        repo_tag: repoTag,
+        image_id: asString(row.image_id) ?? '',
+        created_label: asString(row.created_label) ?? '',
+        size_mb: asNumber(row.size_mb) ?? 0,
+      });
+    }
+  }
+  return { images, state: isRecord(raw) ? (asString(raw.state) ?? 'offline') : 'online' };
 }
 
 export async function fetchEnvImages(clusterId: ID): Promise<EnvImageRow[]> {
   const raw = await api.get<unknown>(`/api/images/envs/${clusterId}`);
-  const r = isRecord(raw) ? raw : {};
-  // DRIFT: backend wraps in {envs};
-  const rows = asRecordList(r.envs.length !== 0 ? r.envs : Array.isArray(raw) ? raw : r.envs ?? r.rows) as unknown[];
-  return rows.filter(isRecord).map((row): EnvImageRow => {
+  // DRIFT: backend wraps in {envs}; tolerate the documented bare array.
+  const rows = Array.isArray(raw) ? raw : isRecord(raw) ? (raw.envs ?? raw.rows ?? []) : [];
+  const out: EnvImageRow[] = [];
+  for (const row of asRecordList(rows)) {
+    // GAP: types.ts pins file/image as non-null strings, but the backend sends
+    // `null` for offline nodes — normalize to '' (page renders as "offline").
     const per = asRecordList(row.clusters).map((c) => ({
       node_id: asString(c.node_id) ?? '',
       node_name: asString(c.node_name) ?? asString(c.node_id) ?? '',
-      file: asString(c.file),
-      image: asString(c.image),
+      file: asString(c.file) ?? '',
+      image: asString(c.image) ?? '',
     }));
-    return { profile_key: asString(row.profile_key) ?? '', clusters: per };
-  });
+    out.push({ profile_key: asString(row.profile_key) ?? '', clusters: per });
+  }
+  return out;
 }
 
 export function fetchDeployPreview(
@@ -413,7 +408,7 @@ export async function deployImageSet(body: {
   return asOpRef(await api.post<unknown>('/api/images/deploys', body));
 }
 
-/** NOTE: `cluster_id` is required by the backend despite docs/API.md omitting it. */
+/** EXTRA+DRIFT: `cluster_id` is required by the backend (docs/API.md omits it). */
 export async function copyImage(body: {
   cluster_id: ID;
   src_node_id: ID;
@@ -431,16 +426,17 @@ export interface BuilderEnvRow {
 
 export async function fetchBuildEnvs(nodeId: ID): Promise<{ files: BuilderEnvRow[]; state: string }> {
   const raw = await api.get<unknown>(`/api/images/builds/${nodeId}`);
-  const r = isRecord(raw) ? raw : {};
-  const files = asRecordList(r.files.length !== 0 ? r.files : Array.isArray(raw) ? raw : r.rows).map(
+  // DRIFT: backend returns {files:[{file,label}], state} — no node_id per row.
+  const payload = isRecord(raw) ? raw : {};
+  const rows = Array.isArray(raw) ? raw : payload.files ?? payload.rows ?? [];
+  const files = asRecordList(rows).map(
     (f): BuilderEnvRow => ({
       node_id: nodeId,
-      // DRIFT: backend rows are {file,label} without node_id
       file: asString(f.file) ?? '',
       label: asString(f.label) ?? asString(f.file) ?? '',
     }),
   );
-  return { files, state: asString(r.state) ?? 'offline' };
+  return { files, state: asString(payload.state) ?? 'offline' };
 }
 
 export async function startImageBuild(body: {
@@ -448,15 +444,14 @@ export async function startImageBuild(body: {
   node_id: ID;
   file: string;
 }): Promise<OpRef> {
-  return asOpRef(
-    await api.post<unknown>('/api/images/builds', body),
-  );
+  return asOpRef(await api.post<unknown>('/api/images/builds', body));
 }
 
 /* ---------------------------------------------------------------------------
-   LLM state (bench "from boot log" reads kv_tokens; mock populates it)
+   LLM state (bench "from boot log" reads kv_tokens; populated after a boot)
    --------------------------------------------------------------------------- */
 
+/** GET /api/llm/{clusterId}/state — ServiceState per docs/API.md. */
 export const fetchLlmState = (clusterId: ID): Promise<ServiceState> =>
   api.get<ServiceState>(`/api/llm/${clusterId}/state`);
 
@@ -472,22 +467,19 @@ export interface BenchDefaults {
 export interface BenchConfig {
   bench_repo_dir: string | null;
   tool_present: boolean;
-  tool: string | null;
   venv_python: string | null;
-  venv_deps_ok: boolean | null; // None = no venv to test
+  venv_deps_ok: boolean | null; // null = no venv to test
   write_repo_runs: boolean | null;
   defaults: BenchDefaults | null;
 }
 
-export async function fetchBenchConfig(): Promise<BenchConfig> {
-  const raw = await api.get<unknown>('/api/bench/config');
+function parseBenchConfigRaw(raw: unknown): BenchConfig {
   const r = isRecord(raw) ? raw : {};
   const defaultsRaw = isRecord(r.defaults) ? r.defaults : null;
   const argsRaw = defaultsRaw !== null && isRecord(defaultsRaw.args) ? defaultsRaw.args : defaultsRaw;
   return {
     bench_repo_dir: asString(r.bench_repo_dir),
     tool_present: r.tool_present === true,
-    tool: asString(r.tool_path) ?? asString(r.tool) ?? (asNumber2(r.tool_present) !== null ? null : null),
     venv_python: asString(r.venv_python),
     venv_deps_ok: typeof r.venv_deps_ok === 'boolean' ? r.venv_deps_ok : null,
     write_repo_runs: typeof r.write_repo_runs === 'boolean' ? r.write_repo_runs : null,
@@ -501,8 +493,8 @@ export async function fetchBenchConfig(): Promise<BenchConfig> {
   };
 }
 
-function asNumber2(v: unknown): number | null {
-  return asNumber(v);
+export async function fetchBenchConfig(): Promise<BenchConfig> {
+  return parseBenchConfigRaw(await api.get<unknown>('/api/bench/config'));
 }
 
 /** PATCH /api/bench/config — partial-capable slice of bench settings. */
@@ -513,19 +505,7 @@ export interface BenchConfigPatch {
 }
 
 export async function patchBenchConfig(body: BenchConfigPatch): Promise<BenchConfig> {
-  const raw = await api.patch<unknown>('/api/bench/config', body);
-  const r = isRecord(raw) ? raw : {};
-  const defaultsRaw = isRecord(r.defaults) ? r.defaults : null;
-  const argsRaw = defaultsRaw !== null && isRecord(defaultsRaw.args) ? defaultsRaw.args : defaultsRaw;
-  return {
-    bench_repo_dir: asString(r.bench_repo_dir),
-    tool_present: r.tool_present === true,
-    tool: asString(r.tool_path) ?? asString(r.tool),
-    venv_python: asString(r.venv_python),
-    venv_deps_ok: typeof r.venv_deps_ok === 'boolean' ? r.venv_deps_ok : null,
-    write_repo_runs: typeof r.write_repo_runs === 'boolean' ? r.write_repo_runs : null,
-    defaults: argsRaw !== null && isRecord(argsRaw) ? { label: asString(defaultsRaw?.label) ?? 'adhoc', args: normalizeBenchArgs(argsRaw) } : null,
-  };
+  return parseBenchConfigRaw(await api.patch<unknown>('/api/bench/config', body));
 }
 
 /** POST /api/bench/bootstrap-venv → `{rc, log}` (synchronous; NOT an op). */
@@ -563,22 +543,16 @@ export async function createBenchJob(input: BenchJobInput): Promise<BenchJobCrea
 }
 
 export async function fetchBenchJobs(limit?: number): Promise<BenchJob[]> {
-  // GAPEXT: docs say response is an array; tolerate {jobs:[…]} defensively.
-  const raw = await api.get<unknown>(limit === undefined ? '/api/bench/jobs' : '/api/bench/jobs', limit === undefined ? undefined : { limit });
-  const wrapped = isRecord(raw) ? asList(raw.jobs) : asList(raw);
+  const raw = await api.get<unknown>(
+    '/api/bench/jobs',
+    limit === undefined ? undefined : { limit },
+  );
+  const rows = isRecord(raw) ? asList(raw.jobs) : asList(raw);
   const out: BenchJob[] = [];
-  for (const j of wrapped) {
-    if (isRecord(j) && typeof j.id === 'string') out.push(asBenchJob(j));
+  for (const row of rows) {
+    if (isRecord(row) && typeof row.id === 'string') out.push(row as unknown as BenchJob);
   }
   return out;
-}
-
-function asBenchJob(j: Record<string, unknown>): BenchJob {
-  const copy = { ...(j as unknown as BenchJob) };
-  if (!Array.isArray((j as { args?: unknown }).args)) {
-    /* args must be BenchArgs-shaped; pass-through, the type pins it */
-  }
-  return copy;
 }
 
 export interface BenchJobDetail {
@@ -588,25 +562,27 @@ export interface BenchJobDetail {
 
 /**
  * GET /api/bench/jobs/{id}?tail=N → job dump + `log_tail` lines.
- * (WS frames use `tail` as a single string; REST returns `log_tail: string[]`.)
+ * (WS frames use `tail` as one string; REST returns `log_tail: string[]`.)
  */
 export async function fetchBenchJob(id: ID, tailLines = 100): Promise<BenchJobDetail> {
   const raw = await api.get<unknown>(`/api/bench/jobs/${id}`, { tail: tailLines });
   const r = isRecord(raw) ? raw : {};
-  const job = isRecord(raw) && typeof raw['id'] === 'string' ? (raw as unknown as BenchJob) : null;
-  const tailRaw = r.log_tail ?? r.tail ?? (job?.log_tail !== undefined ? job.log_tail : []);
+  const job = typeof r.id === 'string' ? (raw as unknown as BenchJob) : null;
+  const tailRaw = r.log_tail ?? r.tail;
   let tail: string[] = [];
   if (typeof tailRaw === 'string') tail = tailRaw.split('\n');
   else if (Array.isArray(tailRaw)) tail = tailRaw.filter((x): x is string => typeof x === 'string');
-  return { job: job === null ? null : asBenchJob(isRecord(raw) ? raw : {}), tail };
+  return { job, tail };
 }
 
+/** SIGINT semantics: partial results preserved (runner keeps SIGKILL as last resort). */
 export async function cancelBenchJob(id: ID): Promise<{ ok: boolean }> {
   const raw = await api.post<unknown>(`/api/bench/jobs/${id}/cancel`, {});
   const r = isRecord(raw) ? raw : {};
   return { ok: r.ok === true };
 }
 
+/** GET /api/bench/jobs/{id}/result — raw tool JSON ({}) while absent. */
 export const fetchBenchResult = (id: ID): Promise<unknown> =>
   api.get<unknown>(`/api/bench/jobs/${id}/result`);
 
@@ -632,9 +608,9 @@ export async function writeBenchReport(id: ID): Promise<BenchReportWritten> {
 
 export async function fetchBenchHistory(): Promise<BenchHistoryRow[]> {
   const raw = await api.get<unknown>('/api/bench/history');
-  const source = isRecord(raw) ? asList(raw.rows) : asList(raw);
+  const rows = isRecord(raw) ? asList(raw.rows) : asList(raw);
   const out: BenchHistoryRow[] = [];
-  for (const row of source) {
+  for (const row of rows) {
     if (!isRecord(row)) continue;
     const summary = isRecord(row.summary) ? row.summary : {};
     out.push({
@@ -651,33 +627,25 @@ export async function fetchBenchHistory(): Promise<BenchHistoryRow[]> {
 }
 
 export function normalizeBenchArgs(r: Record<string, unknown>): BenchArgs {
-  const num = (defaultV: number | null): (v: unknown) => number | null => (v) => asNumber(v) ?? defaultV;
-  const withDefault = (v: unknown, d: number | null) => asNumber(v) ?? d;
   return {
     concurrency: asString(r.concurrency) ?? '',
     contexts: asString(r.contexts) ?? '',
     prefill_contexts: asString(r.prefill_contexts) ?? '',
-    max_tokens: withDefault(r.max_tokens, 2048),
-    duration: withDefault(r.duration, 30),
+    max_tokens: asNumber(r.max_tokens) ?? 2048,
+    duration: asNumber(r.duration) ?? 30,
     coding_peak: r.coding_peak === true,
     coding_peak_runs: asNumber(r.coding_peak_runs) ?? undefined,
     coding_peak_max_tokens: asNumber(r.coding_peak_max_tokens) ?? undefined,
-    kv_budget: withDefault(r.kv_budget, null),
+    kv_budget: asNumber(r.kv_budget),
     extra: asString(r.extra) ?? undefined,
   };
-  void num;
 }
 
 /* ---------------------------------------------------------------------------
-   Profiles + add-node via the bulk upsert pair
+   Profiles save (PATCH → verify → import-upsert fallback) + profile delete
    --------------------------------------------------------------------------- */
 
-/**
- * Save a cluster's profile set. The contract's cluster PATCH drops `profiles`,
- * so: (1) PATCH the cluster with the new profiles array (works on backends
- * that honor it), (2) re-read, (3) if unchanged, fall back to
- * POST /api/settings/import with the whole cluster (bulk upsert).
- */
+/** Save a cluster's profile set; returns the wins + the path that worked. */
 export async function saveProfiles(
   cluster: ClusterTopology,
   profiles: ProfileDef[],
@@ -689,13 +657,13 @@ export async function saveProfiles(
     control: cluster.control,
     profiles,
   });
-  const freshTopo = await fetchClusters();
-  const fresh = freshTopo.find((c) => c.id === cluster.id);
-  if (profilesEqual(fresh?.profiles ?? [], profiles)) return { applied: true, via: 'patch' };
+  const fresh = await fetchClusters();
+  const freshCl = fresh.find((c) => c.id === cluster.id);
+  if (profilesEqual(freshCl?.profiles ?? [], profiles)) return { applied: true, via: 'patch' };
+  // DRIFT: backend cluster PATCH drops `profiles` → ride the import upsert.
   const res = await importTopology([{ ...cluster, profiles }]);
-  if (!res.ok || res.fallbackUsed === null) {
-    return { applied: false, via: res.fallbackUsed === null ? 'none' : 'import' };
-  }
+  if (!res.ok && res.endpointExists) return { applied: false, via: 'import' };
+  if (!res.endpointExists) return { applied: false, via: 'none' };
   const after = await fetchClusters();
   const afterCl = after.find((c) => c.id === cluster.id);
   if (profilesEqual(afterCl?.profiles ?? [], profiles)) return { applied: true, via: 'import' };
@@ -705,32 +673,21 @@ export async function saveProfiles(
 function profilesEqual(a: ProfileDef[], b: ProfileDef[]): boolean {
   if (a.length !== b.length) return false;
   const keyOf = (p: ProfileDef): string =>
-    [p.id, p.key, p.label, p.served_model_name, p.kv_pin_gib ?? '', p.context ?? '', p.speculator ?? '', p.quant ?? '', p.mm_images ?? '', p.mm_videos ?? '', p.notes ?? ''].join('¦');
+    [
+      p.id,
+      p.key,
+      p.label,
+      p.served_model_name,
+      p.model_dir_hint ?? '',
+      p.kv_pin_gib ?? '',
+      p.context ?? '',
+      p.speculator ?? '',
+      p.quant ?? '',
+      p.mm_images ?? '',
+      p.mm_videos ?? '',
+      p.notes ?? '',
+    ].join('¦');
   const sa = a.map(keyOf).sort();
   const sb = b.map(keyOf).sort();
   return sa.every((v, i) => v === sb[i]);
 }
-
-/**
- * POST /api/settings/import — bulk upsert `{topology, settings}`.
- * NOTE: present in the backend (routes.py `settings_import`), missing from
- * docs/API.md — flagged in the report; falls back to client-side enumeration
- * when the endpoint answers as missing.
- */
-export async function importTopology(
-  topology: ClusterTopology[],
-): Promise<{ ok: boolean; clusters: number | null; fallbackUsed: boolean | null; error?: unknown }> {
-  try {
-    const raw = await api.post<unknown>('/api/settings/import', { topology });
-    const r = isRecord(raw) ? raw : {};
-    return { ok: r.ok === true, clusters: asNumber(r.clusters), fallbackUsed: false };
-  } catch (err) {
-    if (isMissingRoute(err)) {
-      // GAP: endpoint absent — caller may still use the per-cluster dispatcher.
-      return { ok: false, clusters: null, fallbackUsed: null, error: err };
-    }
-    throw err;
-  }
-}
-
-export { newId };

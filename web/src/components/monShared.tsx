@@ -18,7 +18,7 @@ import {
 } from '../ds';
 import { fmtCompact, fmtNum } from '../lib/format';
 import type { HistorySeries, SampleFrame } from '../api/types';
-import { WINDOW_MS, windowIsLive, type HistWindow } from '../api/monitoring';
+import { WINDOW_MS, type HistWindow } from '../api/monitoring';
 import { EMPTY_RING, type RingSeries } from '../stores/nodeRings';
 
 /* ---------------------------------------------------------------------------

@@ -4,11 +4,11 @@
    Live sources: REST topology + settings, WS buffers (node conn state, last
    samples, service states, ops, events). Sparklines ride client rings fed by
    the `samples` topic (src/stores/nodeRings.ts); the fleet strip is a
-   client-side aggregate of the same frames. Everything degrades gracefully
+   client-side aggregate over the same frames. Everything degrades gracefully
    when the controller is unreachable.
    ========================================================================= */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight,
@@ -30,7 +30,6 @@ import {
   Empty,
   Gauge,
   Panel,
-  SectionHeader,
   Sparkline,
   Spinner,
   StatusDot,
@@ -39,30 +38,13 @@ import {
   toast,
   Tip,
 } from '../../ds';
-import { api, isApiClientError, useLive } from '../../api/client';
+import { api, isApiClientError } from '../../api/client';
 import { useClusters, useSystemInfo } from '../../api/queries';
 import { useSettings } from '../../api/monitoring';
-import {
-  useActiveOps,
-  useOpsBusy,
-  useRecentOps,
-  useOps,
-} from '../../stores/ops';
-import {
-  useEventsRing,
-  useLiveNodes,
-  useLive,
-  useServiceByCluster,
-} from '../../stores/live';
+import { useActiveOps, useOps, useRecentOps } from '../../stores/ops';
+import { useEventsRing, useLive, useLiveNodes, useServiceByCluster } from '../../stores/live';
 import { useNodeRings } from '../../stores/nodeRings';
-import {
-  Skel,
-  connDotState,
-  fmtCtx,
-  kvMultiplier,
-  parseNum,
-  pickSample,
-} from '../../components/monShared';
+import { Skel, fmtCtx, kvMultiplier, parseNum, pickSample } from '../../components/monShared';
 import { fmtClock, fmtDuration, fmtGiB, fmtNum } from '../../lib/format';
 import type {
   ClusterTopology,
@@ -70,17 +52,40 @@ import type {
   ID,
   LiveNodeState,
   ProfileDef,
-  SampleFrame,
   ServiceState,
 } from '../../api/types';
 
-const SPARK_RATE_CAP = 60; // ring points per mini-card series (stores/nodeRings)
+/** Sparkline ring length — mirrors stores/nodeRings.ts RING_CAP. */
+const RING_POINTS = 60;
+
+interface MemAlerts {
+  mem_warn_gib: number;
+  mem_crit_gib: number;
+  gpu_temp_warn_c: number;
+  gpu_temp_crit_c: number;
+}
+
+function alertsOf(alerts: MemAlerts | null): Required<MemAlerts> {
+  return (
+    alerts ?? {
+      mem_warn_gib: 118.5,
+      mem_crit_gib: 120.5,
+      gpu_temp_warn_c: 85,
+      gpu_temp_crit_c: 95,
+    }
+  );
+}
 
 function cardAccent(cluster: ClusterTopology): string {
   const c = cluster.accent_color;
-  return c !== undefined && c !== null && /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(c)
-    ? c
-    : '#5EB1FF';
+  return c !== undefined && c !== null && /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(c) ? c : '#5EB1FF';
+}
+
+function wsDotState(status: string): 'ok' | 'degraded' | 'offline' | 'unknown' {
+  if (status === 'online') return 'ok';
+  if (status === 'connecting' || status === 'reconnecting') return 'degraded';
+  if (status === 'offline') return 'offline';
+  return 'unknown';
 }
 
 /* =============================================================================
@@ -93,9 +98,8 @@ export default function OverviewPage() {
   const settingsQ = useSettings();
   const nodeStates = useLiveNodes();
   const services = useServiceByCluster();
+  const eventsRing = useEventsRing();
   const wsStatus = useLive((s) => s.status);
-  const opsBusy = useOpsBusy();
-  const opsMap = useOps((s) => s.opsById);
 
   const nodeStateById = useMemo(() => {
     const m = new Map<ID, LiveNodeState>();
@@ -108,7 +112,7 @@ export default function OverviewPage() {
   const context =
     infoQ.data !== null
       ? `${infoQ.data.name} v${infoQ.data.version} · uptime ${fmtDuration(infoQ.data.uptime_s)}` +
-        (infoQ.data.mock ? ' · mock data' : ' live')
+        (infoQ.data.mock ? ' · mock data' : ' · live')
       : clustersQ.loading
         ? 'connecting to controller…'
         : 'controller info unavailable';
@@ -121,10 +125,14 @@ export default function OverviewPage() {
         actions={
           <>
             <Chip variant="neutral" title={`WebSocket: ${wsStatus}`}>
-              <StatusDot state={wsDot(wsStatus)} />
+              <StatusDot state={wsDotState(wsStatus)} size={7} />
               ws: {wsStatus}
             </Chip>
-            <Btn size="sm" variant="ghost" onClick={clustersQ.reload} loading={clustersQ.loading && clusters.length === 0}>
+            <Btn
+              size="sm"
+              variant="ghost"
+              onClick={clustersQ.reload}
+            >
               Refresh
             </Btn>
           </>
@@ -133,21 +141,23 @@ export default function OverviewPage() {
 
       {clustersQ.error !== null && clusters.length === 0 ? (
         <FailedPanel error={clustersQ.error} onRetry={clustersQ.reload} />
-      ) : clusters.length === 0 && (clustersQ.loading || clustersQ.error !== null === false) ? (
-        <ClusterSkeletonGrid />
       ) : clusters.length === 0 ? (
-        <div className="sd-panel flex min-h-[360px] flex-1 items-center justify-center">
-          <Empty
-            icon={<ServerCrash />}
-            title="No clusters configured yet."
-            hint="Add a cluster in Settings to see node health, service state and live charts here."
-            action={
-              <Link to="/settings">
-                <Btn variant="primary" size="sm">Add cluster</Btn>
-              </Link>
-            }
-          />
-        </div>
+        clustersQ.loading ? (
+          <ClusterSkeletonGrid />
+        ) : (
+          <div className="sd-panel flex min-h-[360px] flex-1 items-center justify-center">
+            <Empty
+              icon={<ServerCrash />}
+              title="No clusters configured yet."
+              hint="Add a cluster in Settings to see node health, service state and live charts here."
+              action={
+                <Link to="/settings">
+                  <Btn variant="primary" size="sm">Add cluster</Btn>
+                </Link>
+              }
+            />
+          </div>
+        )
       ) : (
         <>
           <div className="sd-card-gap grid min-w-0 grid-cols-1 xl:grid-cols-2">
@@ -158,27 +168,40 @@ export default function OverviewPage() {
                 nodeStateById={nodeStateById}
                 service={services[c.id]}
                 alerts={settingsQ.data?.alerts ?? null}
-                busy={opsBusy}
-                opsMapHas={(opId: string) => opsMap.has(opId)}
               />
             ))}
           </div>
-          <FleetStrip nodeStates={nodeStates} clusters={clusters} wsStatus={wsStatus} />
+          <FleetStrip
+            nodeStates={nodeStates}
+            clusters={clusters}
+            wsStatus={wsStatus}
+            samplingS={settingsQ.data?.sampling_interval_s ?? 2}
+          />
         </>
       )}
 
-      {/* bottom: events mini-feed + running ops strip */}
       <div className="sd-card-gap mt-6 grid min-w-0 grid-cols-1 lg:grid-cols-3">
-        <Panel className="lg:col-span-2" title="Recent events" sub="live + persisted feed"
-          actions={<Link to="/events" className="inline-flex items-center gap-1 font-mono text-2xs text-accent hover:underline">open events <ArrowRight size={11} /></Link>}
+        <Panel
+          className="lg:col-span-2"
+          title="Recent events"
+          sub="live + persisted feed"
+          actions={
+            <Link to="/events" className="inline-flex items-center gap-1 font-mono text-2xs text-accent hover:underline">
+              open events <ArrowRight size={11} />
+            </Link>
+          }
         >
-          <EventsMiniFeed events={useEventsRing()} />
+          <EventsMiniFeed events={eventsRing} />
         </Panel>
         <Panel
           className="min-w-0"
           title="Operations"
           sub="queued / running first"
-          actions={<Link to="/control" className="inline-flex items-center gap-1 font-mono text-2xs text-accent hover:underline">open control <ArrowRight size={11} /></Link>}
+          actions={
+            <Link to="/control" className="inline-flex items-center gap-1 font-mono text-2xs text-accent hover:underline">
+              open control <ArrowRight size={11} />
+            </Link>
+          }
         >
           <OpsStrip />
         </Panel>
@@ -187,22 +210,8 @@ export default function OverviewPage() {
   );
 }
 
-function wsDot(status: string) {
-  switch (status) {
-    case 'online':
-      return 'ok' as const;
-    case 'connecting':
-    case 'reconnecting':
-      return 'degraded' as const;
-    case 'offline':
-      return 'offline' as const;
-    default:
-      return 'unknown' as const;
-  }
-}
-
 /* =============================================================================
-   Load-, error-, empty-states
+   Load / error states
    ========================================================================== */
 
 function ClusterSkeletonGrid(): ReactNode {
@@ -247,6 +256,10 @@ function FailedPanel({ error, onRetry }: { error: unknown; onRetry: () => void }
   );
 }
 
+function apiErrorText(e: unknown): string {
+  return isApiClientError(e) ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e);
+}
+
 /* =============================================================================
    Cluster card
    ========================================================================== */
@@ -256,37 +269,33 @@ function ClusterCard({
   nodeStateById,
   service,
   alerts,
-  busy,
 }: {
   cluster: ClusterTopology;
   nodeStateById: Map<ID, LiveNodeState>;
   service: ServiceState | undefined;
-  alerts: { mem_warn_gib: number; mem_crit_gib: number; gpu_temp_warn_c: number; gpu_temp_crit_c: number } | null;
-  busy: boolean;
-  voidOps: boolean;
-  opsMapHas: (opId: string) => boolean;
+  alerts: MemAlerts | null;
 }) {
   const accent = cardAccent(cluster);
   const online = cluster.nodes.filter((n) => nodeStateById.get(n.id)?.state === 'online').length;
+  const served = service !== undefined && (service.health === 'up' || service.age_s !== null || service.kv_tokens !== null);
+  const profile = service?.profile_key !== undefined && service.profile_key !== null
+    ? (cluster.profiles.find((p) => p.key === service.profile_key) ?? null)
+    : null;
 
-  const served = service !== undefined && (service.health === 'up' || service.age_s !== null);
-  const profile = cluster.profiles.find((p) => p.key === service?.profile_key) ?? null;
-
-  /* quick actions */
-  const [startOpen, setStartOpen] = useState<ProfileDef | null>(null);
+  const [startProfile, setStartProfile] = useState<ProfileDef | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-
   const opInFlight = useClusterOpInFlight(cluster.id);
+  const busy = submitting || opInFlight;
 
-  const startProfile = async (p: ProfileDef) => {
+  const doStart = async (p: ProfileDef) => {
     setSubmitting(true);
     try {
       const r = await api.post<{ op_id: string }>(`/api/clusters/${cluster.id}/actions/start`, {
         profile_key: p.key,
       });
-      toast.ok(`Start queued (${p.key})`, `op ${r.op_id}`);
-      setStartOpen(null);
+      toast.ok(`Start queued (${p.key})`, `op ${r.op_id} — watch the console`);
+      setStartProfile(null);
     } catch (e) {
       toast.error('Start failed', apiErrorText(e));
     } finally {
@@ -294,7 +303,7 @@ function ClusterCard({
     }
   };
 
-  const stopCluster = async () => {
+  const doStop = async () => {
     setSubmitting(true);
     try {
       const r = await api.post<{ op_id: string }>(`/api/clusters/${cluster.id}/actions/stop`, {});
@@ -306,6 +315,11 @@ function ClusterCard({
       setSubmitting(false);
     }
   };
+
+  const kv = service?.kv_tokens ?? null;
+  const ctxTok = profile?.context ?? null;
+  const ctxLabel = fmtCtx(ctxTok);
+  const mult = kv !== null && ctxTok !== null ? kvMultiplier(kv, ctxTok) : null;
 
   return (
     <section className="sd-panel flex min-w-0 flex-col p-4">
@@ -324,30 +338,37 @@ function ClusterCard({
             </Link>
             <Chip variant="neutral" className="font-mono">{cluster.kind}</Chip>
           </div>
-          <div className="mt-0.5 font-mono text-2xs text-low">
+          <div className="mt-0.5 truncate font-mono text-2xs text-low">
             {online}/{cluster.nodes.length} online · {cluster.profiles.length} profile{cluster.profiles.length === 1 ? '' : 's'}
-            {cluster.notes !== undefined && cluster.notes !== null ? ` · ${cluster.notes}` : ''}
+            {cluster.notes !== undefined && cluster.notes !== null && cluster.notes !== '' ? ` · ${cluster.notes}` : ''}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {service !== undefined && (
+          {service !== undefined ? (
             <Chip
               variant={
-                service.health === 'up' ? 'ok' : service.health === 'degraded' ? 'warn' : service.health === 'down' ? 'crit' : 'neutral'
+                service.health === 'up'
+                  ? 'ok'
+                  : service.health === 'degraded'
+                    ? 'warn'
+                    : service.health === 'down'
+                      ? 'crit'
+                      : 'neutral'
               }
               title={service.model !== null ? `health ${service.health} · ${service.model}` : `health ${service.health}`}
             >
               <StatusDot state={healthDot(service.health)} size={7} />
               {service.health}
             </Chip>
+          ) : (
+            <Chip variant="neutral" title="No service frame received yet (ws or REST)">service unknown</Chip>
           )}
-          {service === undefined && <Chip variant="neutral" title="No service state received yet (ws or REST)">service unknown</Chip>}
         </div>
       </div>
 
-      {/* profile + image + uptime when the service is actually up */}
+      {/* profile / image / uptime / endpoint when served */}
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
-        {served && service !== undefined ? (
+        {service !== undefined && served ? (
           <>
             {service.profile_key !== null && (
               <Chip color={accent} title={`Active serving profile (${service.profile_key})`}>
@@ -355,9 +376,9 @@ function ClusterCard({
               </Chip>
             )}
             {service.image !== null && (
-              <Tip text={`${service.image} — served image tag`}>
-                <Chip variant="neutral" className="font-mono">
-                  <span className="max-w-[280px] truncate">{shortTag(service.image)}</span>
+              <Tip text={service.image}>
+                <Chip variant="neutral" className="font-mono" title="served image">
+                  <span className="max-w-[300px] truncate">{shortTag(service.image)}</span>
                 </Chip>
               </Tip>
             )}
@@ -367,7 +388,7 @@ function ClusterCard({
               </Chip>
             )}
             {service.host !== null && (
-              <Chip variant="neutral" className="font-mono" title={`${service.host}:${service.port ?? '—'} — serving endpoint`}>
+              <Chip variant="neutral" className="font-mono" title={`${service.host}:${service.port ?? '?'} — serving endpoint`}>
                 {service.host}:{service.port ?? '?'}
               </Chip>
             )}
@@ -378,16 +399,19 @@ function ClusterCard({
       </div>
 
       {/* KV pool tokens + context */}
-      {service !== undefined && service.kv_tokens !== null && (
-        <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="sd-monolabel">kv pool</span>
-          <span className="sd-num font-mono text-sm text-hi" title={`kv_tokens — cluster KV cache capacity in tokens${profile?.context !== undefined && profile?.context !== null ? ` (context ${fmtCtx(profile.context)})` : ''}`}>
-            {fmtNum(service.kv_tokens)}
+      {kv !== null && (
+        <div className="mt-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="sd-monolabel shrink-0">kv pool</span>
+          <span
+            className="sd-num font-mono text-sm text-hi"
+            title="kv_tokens — cluster KV cache capacity in tokens (verify op + /metrics)"
+          >
+            {fmtNum(kv)}
             <span className="text-low"> tokens</span>
           </span>
-          {profile !== null && profile.context !== undefined && profile.context !== null && kvMultiplier(service.kv_tokens, profile.context) !== null && (
-            <span className="font-mono text-2xs text-mid">
-              ≈ {fmtNum(Math.round((kvMultiplier(service.kv_tokens, profile.context) ?? 0) * 10) / 10)}× {fmtCtx(profile.context)}
+          {ctxLabel !== null && mult !== null && (
+            <span className="font-mono text-2xs text-mid" title={`Profile context = ${fmtNum(ctxTok)} tokens`}>
+              ≈ {fmtNum(Math.round(mult * 10) / 10)}× {ctxLabel}
             </span>
           )}
         </div>
@@ -395,70 +419,62 @@ function ClusterCard({
 
       {/* quick actions */}
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-stroke pt-3">
-        <StartMenu
-          cluster={cluster}
-          disabled={busy || opInFlight || submitting}
-          onPick={(p) => setStartOpen(p)}
-        />
+        <StartMenu cluster={cluster} disabled={busy} onPick={(p) => setStartProfile(p)} />
         <Btn
           size="sm"
           variant="ghost"
           icon={<Power size={12} />}
-          disabled={busy || opInFlight || submitting}
+          disabled={busy}
           onClick={() => setStopOpen(true)}
+          title="Stop the serving pair (both ranks)"
         >
           Stop
         </Btn>
         <Link
           to="/control"
           className="ml-auto inline-flex items-center gap-1.5 rounded-inner border border-stroke px-2 py-1 font-mono text-2xs text-mid transition-colors duration-fast hover:border-stroke-strong hover:text-hi"
-          title="Open the cluster console (start/stop, preflight, op log)"
+          title="Open the cluster console: start/stop, preflight, live op log"
         >
           open cluster console <ExternalLink size={11} />
         </Link>
       </div>
 
       {/* per-node mini-cards */}
-      <div className="mv-3 mt-3 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+      <div className="mt-3 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
         {cluster.nodes.map((n) => (
-          <NodeMiniCard
-            key={n.id}
-            node={n}
-            accent={accent}
-            state={nodeStateById.get(n.id)}
-            alerts={alerts}
-          />
+          <NodeMiniCard key={n.id} node={n} accent={accent} state={nodeStateById.get(n.id)} alerts={alertsOf(alerts)} />
         ))}
         {cluster.nodes.length === 0 && (
           <div className="col-span-full py-4 text-center text-xs text-low">No nodes on this cluster yet.</div>
         )}
       </div>
 
-      {/* dialogs */}
+      {/* start confirmation */}
       <ConfirmDialog
-        open={startOpen !== null}
-        onClose={() => setStartOpen(null)}
+        open={startProfile !== null}
+        onClose={() => setStartProfile(null)}
         onConfirm={() => {
-          if (startOpen !== null) void startProfile(startOpen);
+          if (startProfile !== null) void doStart(startProfile);
         }}
-        title={startOpen !== null ? `Start — ${cluster.name}` : ''}
+        title={startProfile !== null ? `Start — ${cluster.name}` : ''}
         busy={submitting}
         danger={false}
         confirmLabel="Start serving"
         summary={
           <>
-            Launch <b>{startOpen?.label ?? 'profile'}</b>{' '}
-            <span className="font-mono text-2xs text-mid">({startOpen?.key})</span> on the serving pair — head{' '}
-            <span className="font-mono">{headName(cluster)}</span> first, then the worker. The engine takes
-            cluster control: preflight, GID check, teardown, then pair start.
+            Launch <b>{startProfile?.label ?? 'profile'}</b>{' '}
+            <span className="font-mono text-2xs text-mid">({startProfile?.key})</span> on the pair — head{' '}
+            <span className="font-mono">{headName(cluster)}</span> first, then the worker. Engine runs
+            preflight → GID check → teardown → start (both new ranks boot; in-flight inference restarts).
           </>
         }
-        commands={startCommands(cluster, startOpen)}
+        commands={startCommands(cluster, startProfile)}
       />
+      {/* stop confirmation — states BOTH ranks stop */}
       <ConfirmDialog
         open={stopOpen}
         onClose={() => setStopOpen(false)}
-        onConfirm={() => void stopCluster()}
+        onConfirm={() => void doStop()}
         title={`Stop — ${cluster.name}`}
         busy={submitting}
         danger
@@ -466,9 +482,10 @@ function ClusterCard({
         confirmWord="stop"
         summary={
           <>
-            This stops the serving pair: <b>both ranks go down</b> (head{' '}
+            This stops the serving pair — <b>both ranks go down</b>: head{' '}
             <span className="font-mono">{headName(cluster)}</span> and worker{' '}
-            <span className="font-mono">{workerName(cluster)}</span>). In-flight inference is interrupted.
+            <span className="font-mono">{workerName(cluster)}</span>. In-flight inference is interrupted
+            and the models unload.
           </>
         }
         commands={stopCommands(cluster)}
@@ -477,13 +494,10 @@ function ClusterCard({
   );
 }
 
-function apiErrorText(e: unknown): string {
-  return isApiClientError(e) ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e);
-}
-
 function headName(c: ClusterTopology): string {
   return c.nodes.find((n) => n.role === 'head')?.name ?? c.control.head_node_id;
 }
+
 function workerName(c: ClusterTopology): string {
   return c.nodes.find((n) => n.role === 'worker')?.name ?? c.control.worker_node_id;
 }
@@ -511,11 +525,35 @@ function stopCommands(cluster: ClusterTopology): string[] {
   return [`bash ${cluster.control.launcher} --down   # head then worker — both ranks stop`];
 }
 
+/** true while a start/stop op is queued/running on this cluster */
+function useClusterOpInFlight(clusterId: ID): boolean {
+  return useOps((s) => {
+    for (const op of s.opsById.values()) {
+      if (
+        op.cluster_id === clusterId &&
+        (op.kind === 'cluster.start' || op.kind === 'cluster.stop') &&
+        (op.state === 'running' || op.state === 'queued')
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
 /* -----------------------------------------------------------------------------
-   Start ▾ menu (profiles)
+   Start ▾ profile menu
    --------------------------------------------------------------------------- */
 
-function StartMenu({ cluster, disabled, onPick }: { cluster: ClusterTopology; disabled: boolean; onPick: (p: ProfileDef) => void }) {
+function StartMenu({
+  cluster,
+  disabled,
+  onPick,
+}: {
+  cluster: ClusterTopology;
+  disabled: boolean;
+  onPick: (p: ProfileDef) => void;
+}) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -545,6 +583,7 @@ function StartMenu({ cluster, disabled, onPick }: { cluster: ClusterTopology; di
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
+        title={cluster.profiles.length === 0 ? 'No profiles configured' : 'Start the serving pair with a profile'}
       >
         Start
         <ChevronDown size={12} className={cn('transition-transform duration-fast', open && 'rotate-180')} />
@@ -552,7 +591,7 @@ function StartMenu({ cluster, disabled, onPick }: { cluster: ClusterTopology; di
       {open && (
         <div
           role="menu"
-          className="sd-panel absolute top-full left-0 z-40 mt-1.5 w-[320px] overflow-hidden p-1"
+          className="sd-panel absolute top-full left-0 z-40 mt-1.5 w-[340px] overflow-hidden p-1"
           style={{ background: 'var(--sd-bg2)' }}
         >
           {cluster.profiles.length === 0 && (
@@ -575,7 +614,7 @@ function StartMenu({ cluster, disabled, onPick }: { cluster: ClusterTopology; di
                   {p.quant ?? '—'} · {p.speculator ?? 'no spec'}
                 </span>
               </span>
-              <span className="truncate font-mono text-2xs text-low" title={p.served_model_name}>
+              <span className="truncate font-mono text-2xs text-low" title={`${p.key} — ${p.served_model_name}`}>
                 {p.key} · {p.served_model_name}
               </span>
             </button>
@@ -584,23 +623,6 @@ function StartMenu({ cluster, disabled, onPick }: { cluster: ClusterTopology; di
       )}
     </div>
   );
-}
-
-/** true while a start/stop op is actively (queued|running) on this cluster */
-function useClusterOpInFlight(clusterId: ID): boolean {
-  const busy = useOps((s) => {
-    for (const op of s.opsById.values()) {
-      if (
-        op.cluster_id === clusterId &&
-        (op.kind === 'cluster.start' || op.kind === 'cluster.stop') &&
-        (op.state === 'running' || op.state === 'queued')
-      ) {
-        return true;
-      }
-    }
-    return false;
-  });
-  return busy;
 }
 
 /* =============================================================================
@@ -616,15 +638,15 @@ function NodeMiniCard({
   node: ClusterTopology['nodes'][number];
   accent: string;
   state: LiveNodeState | undefined;
-  alerts: ClusterCardProps['alerts'];
+  alerts: Required<MemAlerts>;
 }) {
-  const isHead = node.role === 'head';
   const netRxId = useMemo(() => {
     const interest = node.interest_ifaces[0];
-    return interest !== undefined && interest !== '' ? `net.${interest}.rx_kbps` : null;
+    if (interest !== undefined && interest !== '') return `net.${interest}.rx_kbps`;
+    return null;
   }, [node.interest_ifaces]);
 
-  const rings = useNodeRings(node.id, netRxId === null ? [] : [netRxId]);
+  const rings = useNodeRings(node.id, netRxId !== null ? [netRxId] : []);
   const rxRing = rings[0];
 
   return (
@@ -633,33 +655,37 @@ function NodeMiniCard({
       title={`Open node dashboard — ${node.name}`}
       className="sd-raised group flex min-w-0 cursor-pointer flex-col gap-2.5 p-3 transition-colors duration-fast hover:border-stroke-strong"
     >
-      {/* header row: dot + name + role */}
       <div className="flex min-w-0 items-center gap-2">
         <StatusDot state={connDot(state?.state ?? 'unknown')} size={8} title={`conn ${state?.state ?? 'unknown'}`} />
         <span className="truncate text-xs font-semibold text-hi group-hover:underline">{node.name}</span>
-        <Chip variant={isHead ? 'accent' : 'neutral'} color={isHead ? accent : undefined} className="font-mono" title={`role ${node.role} · env_rank ${node.env_rank}`}>
+        <Chip
+          variant={node.role === 'head' ? 'accent' : 'neutral'}
+          color={node.role === 'head' ? accent : undefined}
+          className="font-mono"
+          title={`role ${node.role} · env_rank ${node.env_rank}`}
+        >
           {node.role === 'head' ? 'head' : `w${node.env_rank}`}
         </Chip>
-        <span className="ml-auto min-w-0 truncate font-mono text-2xs text-low" title={`addr_used ${state?.addr_used ?? 'n/a'}`}>
+        <span className="ml-auto min-w-0 truncate font-mono text-2xs text-low" title={`addr_used — the address the collector reached this node on`}>
           {state?.addr_used ?? '—'}
         </span>
       </div>
 
-      {/* gauges row */}
       <div className="flex items-center gap-3">
         <GpuGaugeMini nodeId={node.id} accent={accent} />
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <MemBarMini nodeId={node.id} alerts={alerts} />
-          <div className="flex items-center gap-2">
-            <TempChip nodeId={node.id} alerts={alerts} />
+          <MemRowMini nodeId={node.id} alerts={alerts} />
+          <div className="flex min-w-0 items-center gap-2">
+            <TempChipMini nodeId={node.id} alerts={alerts} />
             {netRxId !== null && (
-              <Tip text={`${netRxId} — last ${SPARK_RATE_CAP} live samples`}>
+              <Tip text={`${netRxId} — last ${RING_POINTS} live samples`}>
                 <Sparkline
                   values={rxRing?.v ?? []}
                   color={accent}
-                  width={92}
+                  width={90}
                   height={22}
-                  title={`net rx kbit/s — last ${SPARK_RATE_CAP} live samples`}
+                  title={`net rx kbit/s — last ${RING_POINTS} live samples`}
+                  className="ml-auto shrink-0"
                 />
               </Tip>
             )}
@@ -670,27 +696,28 @@ function NodeMiniCard({
   );
 }
 
-function GpuGaugeMini({ nodeId, accent }: { nodeId: ID; accent: string }) {
+function GpuGaugeMini({ nodeId, accent }: { nodeId: ID; accent: string }): ReactNode {
   const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const util = sample?.series === undefined ? null : parseNum(sample.series['gpu.util']);
-  return <Gauge value={util} size={56} unit="%" title={`gpu.util — ${util === null ? 'no sample' : `${util.toFixed(1)}%`}`} style={{ color: accent }} className="shrink-0" />;
+  const util = parseNum(sample?.series['gpu.util']);
+  return (
+    <Gauge
+      value={util}
+      size={56}
+      unit="%"
+      color={accent}
+      className="shrink-0"
+      title={`gpu.util — ${util === null ? 'no sample yet' : `${util.toFixed(1)}%`} · node ${nodeId}`}
+    />
+  );
 }
 
-function MemBarMini({
-  nodeId,
-  alerts,
-}: {
-  nodeId: ID;
-  alerts: { mem_warn_gib: number; mem_crit_gib: number; gpu_temp_warn_c: number; gpu_temp_crit_c: number } | null;
-}) {
+function MemRowMini({ nodeId, alerts }: { nodeId: ID; alerts: Required<MemAlerts> }) {
   const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const used = sample?.series === undefined ? null : parseNum(sample.series['mem.used_gib']);
-  const warn = alerts?.mem_warn_gib ?? 118.5;
-  const crit = alerts?.mem_crit_gib ?? 120.5;
-  const max = Math.max(crit, used === null ? crit : Math.max(crit, used + 2));
-  const frac = used === null ? null : Math.max(0, Math.min(1, used / max));
-  const tone = used === null ? undefined : used >= crit ? 'crit' : used >= warn ? 'warn' : 'ok';
-  const valueColor = tone === 'crit' ? 'var(--sd-crit)' : tone === 'warn' ? 'var(--sd-warn)' : 'var(--sd-mid)';
+  const used = parseNum(sample?.series['mem.used_gib']);
+  const { mem_warn_gib: warn, mem_crit_gib: crit } = alerts;
+  const max = Math.max(crit, used !== null ? used + 2 : 0);
+  const valueColor =
+    used === null ? 'var(--sd-low)' : used >= crit ? 'var(--sd-crit)' : used >= warn ? 'var(--sd-warn)' : 'var(--sd-mid)';
   return (
     <div className="min-w-0" title={`mem.used_gib — ${used === null ? 'no sample' : fmtGiB(used)}`}>
       <div className="mb-0.5 flex items-baseline justify-between gap-2">
@@ -699,21 +726,34 @@ function MemBarMini({
           {fmtGiB(used)}
         </span>
       </div>
-      <Bar value={used} max={max} horizon={warn / max} thresholds={[{ at: crit, color: TONE_HEX.crit }, { at: warn, color: TONE_HEX.warn }]} title={`mem used / ${max} GiB envelope · horizon ${fmtGiB(warn)}`} height={5} />
+      <Bar
+        value={used}
+        max={max}
+        horizon={max > 0 ? warn / max : null}
+        thresholds={[
+          { at: warn, color: '#FBBF24' },
+          { at: crit, color: '#F87171' },
+        ]}
+        title={`mem used · ${fmtGiB(warn)} warn horizon · ${fmtGiB(crit)} crit`}
+        height={5}
+      />
     </div>
   );
 }
 
-function TempChip({ nodeId, alerts }: { nodeId: ID; alerts: { mem_warn_gib: number; mem_crit_gib: number; gpu_temp_warn_c: number; gpu_temp_crit_c: number } | null }) {
+function TempChipMini({ nodeId, alerts }: { nodeId: ID; alerts: Required<MemAlerts> }) {
   const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const temp = sample?.series === undefined ? null : pickSample(sample.series, 'gpu.temp');
-  const warn = alerts?.gpu_temp_warn_c ?? 85;
-  const crit = alerts?.gpu_temp_crit_c ?? 95;
+  const temp = pickSample(sample?.series, 'gpu.temp');
+  const { gpu_temp_warn_c: warn, gpu_temp_crit_c: crit } = alerts;
   const variant = temp === null ? 'neutral' : temp >= crit ? 'crit' : temp >= warn ? 'warn' : 'neutral';
   return (
-    <Chip variant={variant} title={`gpu.temp — ${temp === null ? 'no sample' : `${temp.toFixed(1)}°C (warn ${warn}°, crit ${crit}°)`}`}>
+    <Chip
+      variant={variant}
+      className="shrink-0"
+      title={`gpu.temp — ${temp === null ? 'no sample' : `${temp.toFixed(1)}°C (warn ${warn}°, crit ${crit}°)`}`}
+    >
       <Thermometer size={11} aria-hidden />
-      <span className="sd-num font-mono">{temp === null ? '—' : `${fmtNum(Math.round(temp * 10) / 10)}°`}</span>
+      <span className="sd-num font-mono">{temp === null ? '—°' : `${(Math.round(temp * 10) / 10).toFixed(1)}°`}</span>
     </Chip>
   );
 }
@@ -722,28 +762,21 @@ function TempChip({ nodeId, alerts }: { nodeId: ID; alerts: { mem_warn_gib: numb
    Fleet footer strip — client-side aggregate over the live sample frames
    ========================================================================== */
 
-interface FleetPoint {
-  t: number;
-  gpu: number | null;
-  mem: number | null;
-}
 const FLEET_CAP = 60;
 
 function FleetStrip({
   nodeStates,
   clusters,
   wsStatus,
+  samplingS,
 }: {
   nodeStates: LiveNodeState[];
   clusters: ClusterTopology[];
   wsStatus: string;
+  samplingS: number;
 }) {
   const samples = useLive((s) => s.lastSampleByNode);
-  const [fleet, setFleet] = useState<{ t: number[]; gpu: Array<number | null>; mem: Array<number | null> }>({
-    t: [],
-    gpu: [],
-    mem: [],
-  });
+  const [fleet, setFleet] = useState<{ gpu: Array<number | null>; mem: Array<number | null> }>({ gpu: [], mem: [] });
   const lastTs = useRef(0);
 
   useEffect(() => {
@@ -771,7 +804,6 @@ function FleetStrip({
       }
     }
     setFleet((p) => ({
-      t: [...p.t, ts].slice(-FLEET_CAP),
       gpu: [...p.gpu, gpuN > 0 ? gpuSum / gpuN : null].slice(-FLEET_CAP),
       mem: [...p.mem, memN > 0 ? memSum / memN : null].slice(-FLEET_CAP),
     }));
@@ -779,23 +811,28 @@ function FleetStrip({
 
   const lastGpu = lastValue(fleet.gpu);
   const lastMem = lastValue(fleet.mem);
-  const nodeCount = nodeStates.length;
+  const totalNodes =
+    nodeStates.length > 0 ? nodeStates.length : clusters.reduce((n, c) => n + c.nodes.length, 0);
+  const sources = lastGpu === null && lastMem === null ? 0 : totalNodes;
 
   return (
     <Panel className="mt-6 shrink-0 px-4 py-3">
       <div className="flex min-w-0 flex-wrap items-center gap-x-8 gap-y-3">
-        <div className="flex items-center gap-2" title="Average gpu.util across every node currently reporting">
-          <span className="sd-monolabel">fleet gpu.util</span>
-          <span className="sd-num font-mono text-lg font-semibold text-hi">{lastGpu === null ? '—' : `${fmtNum(Math.round(lastGpu * 10) / 10)}%`}</span>
+        <div className="flex min-w-0 items-center gap-2" title="Average gpu.util over every node currently reporting">
+          <span className="sd-monolabel shrink-0">fleet gpu.util</span>
+          <span className="sd-num font-mono text-lg font-semibold text-hi">
+            {lastGpu === null ? '—' : `${(Math.round(lastGpu * 10) / 10).toFixed(1)}%`}
+          </span>
           <Sparkline values={fleet.gpu} width={140} height={26} title="fleet gpu.util — avg across clusters" />
         </div>
-        <div className="flex items-center gap-2" title="Average mem.used_gib across every node currently reporting">
-          <span className="sd-monolabel">fleet mem</span>
+        <div className="flex min-w-0 items-center gap-2" title="Average mem.used_gib over every node currently reporting">
+          <span className="sd-monolabel shrink-0">fleet mem</span>
           <span className="sd-num font-mono text-lg font-semibold text-hi">{fmtGiB(lastMem)}</span>
           <Sparkline values={fleet.mem} width={140} height={26} title="fleet mem used — avg across clusters" />
         </div>
         <span className="ml-auto font-mono text-2xs text-low" title="Data source note">
-          {wsStatus === 'online' ? 'live' : 'stale'} ws sample frames · avg across {nodeCount || clusters.reduce((n, c) => n + c.nodes.length, 0)} node{(nodeCount || clusters.length) === 1 ? '' : 's'} · x-axis live tail (60 pts)
+          <span className={wsStatus === 'online' ? 'text-accent' : undefined}>{wsStatus === 'online' ? 'live' : wsStatus}</span>
+          {' · '}~{samplingS}s per node · avg across {sources} node{sources === 1 ? '' : 's'} · x-axis: live tail ({FLEET_CAP} pts)
         </span>
       </div>
     </Panel>
@@ -817,7 +854,13 @@ function lastValue(arr: Array<number | null>): number | null {
 function EventsMiniFeed({ events }: { events: EventRec[] }) {
   const last6 = events.slice(0, 6);
   if (last6.length === 0) {
-    return <Empty title="No events yet." hint="Alerts, op completions and connection changes land here as they happen." className="py-6" />;
+    return (
+      <Empty
+        title="No events yet."
+        hint="Alerts, op completions and connection changes land here as they happen."
+        className="py-6"
+      />
+    );
   }
   return (
     <ul className="flex flex-col pb-2">
@@ -837,16 +880,23 @@ function EventRow({ ev }: { ev: EventRec }): ReactNode {
         title={ev.level}
         className="shrink-0"
       />
-      <span className="sd-num shrink-0 font-mono text-2xs text-low" title={ev.kind}>
+      <span className="sd-num shrink-0 font-mono text-2xs text-low" title={new Date(ev.ts).toISOString()}>
         {fmtClock(ev.ts)}
       </span>
       <span className={cn('shrink-0 font-mono text-2xs', toneText)} title={ev.kind}>
         {ev.kind}
       </span>
-      <span className="min-w-0 flex-1 truncate text-xs text-mid" title={`${ev.message}${ev.data !== undefined && ev.data !== null ? ` · ${JSON.stringify(ev.data)}` : ''}`}>
+      <span
+        className="min-w-0 flex-1 truncate text-xs text-mid"
+        title={`${ev.message}${ev.data !== undefined && ev.data !== null ? ` · ${JSON.stringify(ev.data)}` : ''}`}
+      >
         {ev.message}
       </span>
-      {!ev.acked && <Chip variant="neutral" className="shrink-0" title="unacknowledged">unack</Chip>}
+      {!ev.acked && (
+        <Chip variant="neutral" className="shrink-0" title="unacknowledged">
+          unack
+        </Chip>
+      )}
     </li>
   );
 }
@@ -867,23 +917,44 @@ function OpsStrip(): ReactNode {
   }, [active, recent]);
 
   if (rows.length === 0) {
-    return <Empty title="Operations are idle." hint="Starts, stops, image moves and bench runs are audited here." className="py-6" />;
+    return (
+      <Empty
+        title="Operations are idle."
+        hint="Starts, stops, image moves and bench runs are audited here."
+        className="py-6"
+      />
+    );
   }
   return (
     <ul className="flex flex-col pb-2">
       {rows.map((op) => (
-        <li key={op.id} className="flex min-w-0 items-center gap-2 border-b border-stroke px-4 py-1.5 last:border-b-0" title={op.message ?? op.kind}>
+        <li
+          key={op.id}
+          className="flex min-w-0 items-center gap-2 border-b border-stroke px-4 py-1.5 last:border-b-0"
+          title={op.message ?? op.kind}
+        >
           {op.state === 'running' || op.state === 'queued' ? (
             <Spinner size={10} />
           ) : (
-            <Wrench size={11} className={op.state === 'error' ? 'text-crit' : op.state === 'ok' ? 'text-ok' : 'text-low'} aria-hidden />
+            <Wrench size={11} aria-hidden className={op.state === 'error' ? 'text-crit' : op.state === 'ok' ? 'text-ok' : 'text-low'} />
           )}
           <span className="sd-num shrink-0 font-mono text-2xs text-low">{fmtClock(op.created)}</span>
-          <span className="truncate font-mono text-2xs text-mid">{op.kind}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-2xs text-mid" title={`op ${op.id}`}>
+            {op.kind}
+          </span>
           <Chip
-            variant={op.state === 'ok' ? 'ok' : op.state === 'error' ? 'crit' : op.state === 'running' ? 'accent' : op.state === 'cancelled' ? 'warn' : 'neutral'}
-            className="ml-auto shrink-0 font-mono"
-            title={`op ${op.id} — ${op.state}`}
+            variant={
+              op.state === 'ok'
+                ? 'ok'
+                : op.state === 'error'
+                  ? 'crit'
+                  : op.state === 'running'
+                    ? 'accent'
+                    : op.state === 'cancelled'
+                      ? 'warn'
+                      : 'neutral'
+            }
+            className="shrink-0 font-mono"
           >
             {op.state}
           </Chip>
