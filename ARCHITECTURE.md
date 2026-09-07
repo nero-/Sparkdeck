@@ -128,21 +128,28 @@ temp.nvme[<k>]` `docker.<ctr>.cpu_pct docker.<ctr>.mem_gib`
 vllm.num_waiting vllm.kv_usage_perc vllm.prefix_hit_perc vllm.ttft_ms_p50
 vllm.ttft_ms_p95 vllm.tpot_ms_p50 vllm.spec_accept_perc vllm.req_active`.
 
-## Verified node facts (from the operator's builds)
+## Verified node facts (from the operator's builds and confirmed live 2026-09-07)
 
-- Nodes use user `nero` on LAN IPs with key auth; `-4`/`AddressFamily inet` required
-  on this network (mDNS/IPv6 quirk). The pool honours per-node `ssh_alias` if
-  set (asyncssh reads the same `~/.ssh/config`), else raw `user@addr`.
-- Serving releases run as two docker containers (`glm53-flash-r0`/`-r1` on
-  cluster 1, `glm53-flash-r2`/`-r3` on cluster 2) with host-network on the
-  head (`API_PORT` 8000, node-local health at `http://127.0.0.1:8000/health`).
-- Env-file pair convention: `rank-{env_rank}-{profile}.env` in the cluster's
-  serve dir on EACH node (env_rank 0/1 on cluster 1, 2/3 on cluster 2).
-  Profiles: `mtp3-spark mtp3-nvfp4 df-spark df-nvfp4` (same names both
-  clusters; same image line).
-- ~119–120 GiB used per node is normal/healthy with pinned KV; > ~121.5 GiB
-  risks host OOM — the alert threshold encodes 118.5/120.5 GiB warning/critical.
-- Page cache counts against free CUDA memory → `drop_caches` is part of
-  preflight; swappiness must be 0 while serving.
-- RoCE GID index can shift after reboot/recable; the GID check+fix mirrors
-  pairctl every start (and is available standalone).
+- All four GB10 nodes connect over SSH (LAN) with the operator's keys; fabric
+  addresses are node-to-node only (the controller host cannot reach them
+  directly) — hence seeded order LAN → Tailscale → fabric.
+- **asyncssh quirk (live-verified)**: `create_process` with separately-piped
+  stderr wedges `readline()` on these nodes — merged-stderr default works and
+  the NDJSON filter tolerates stray diagnostics. Any new stream path must use
+  the default streams.
+- **nvidia-smi on GB10**: utilization/temp/power/sm-clock valid; memory NOT
+  exposed ("Not Supported") — the real unified-memory gauges come from
+  `/proc/meminfo` (MemAvailable; MemAvailable+SwapFree is the official
+  allocatable estimate). DGX Dashboard/DCGM/tegrastats are dead ends.
+- GB10 live serving measurement (r2, idle): ~120.7 GiB used of 121.7 — alert
+  defaults therefore warn at 121.0 / crit at 121.4 GiB (OOM risk ~121.5).
+- Idle GPU temps on the nodes can touch 88 °C with the fan curve; thermal
+  warn/crit defaults are 86/94 °C (zones throttle near ~96 °C).
+- vLLM metric names DILEMMA resolved: both v0 (`GPU_cache_usage_perc`,
+  `time_per_output_token_seconds`) and v1 (`kv_cache_usage_perc`,
+  `inter_token_latency_seconds`) aliases are accepted by the collector.
+- Live env files on the hosts are ground truth (repo `env/` templates are
+  IP-scrubbed) — the console reads them via SSH (`--check` + `grep`).
+- Real serving pair is NOT to be cycled by automation (agent/OWUI/Hermes/DSH
+  dependency) — WRITE ops always require an explicit operator confirmation.
+

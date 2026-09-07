@@ -555,7 +555,7 @@ function OpsTable() {
               </span>
               <span className="flex justify-end">
                 <Link to="/control" title="open /control" className="inline-flex p-0.5 text-low transition-colors hover:text-accent">
-                  <Terminal2Icon />
+                  <ExternalLink size={12} />
                 </Link>
               </span>
             </div>
@@ -574,7 +574,18 @@ function opDuration(op: OpRecord): string {
   return s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
 
-/* lucide has no plain "terminal small" icon sized well at 13px; reuse */
-function Terminal2Icon(): React.ReactNode {
-  return <span aria-hidden className="font-mono text-[11px] leading-none">↗</span>;
+/** op state → chip variant (same mapping as the control page timeline). */
+function opStateVariant(state: OpRecord['state']): 'neutral' | 'ok' | 'warn' | 'crit' | 'accent' {
+  switch (state) {
+    case 'running':
+      return 'accent';
+    case 'ok':
+      return 'ok';
+    case 'error':
+      return 'crit';
+    case 'cancelled':
+      return 'warn';
+    default:
+      return 'neutral';
+  }
 }

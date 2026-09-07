@@ -33,7 +33,6 @@ import {
   connDot,
   healthDot,
   Tip,
-  toast,
   type ChartSeriesData,
   type ChartSeriesDef,
 } from '../../ds';
