@@ -51,7 +51,8 @@ class SeriesStore:
         self.db = db
         self.settings_ref = settings_ref  # object with .settings: AppSettings (live)
         self.rings: dict[str, dict[str, Ring]] = {}
-        self._raw_buf: dict[str, dict[str, tuple[int, float | None]]] = {}
+        self._raw_buf: dict[str, dict[str, dict]] = {}   # node → name → {slot, v}
+        self._raw_pending: list[tuple] = []              # (slot_ts, node_id, name, value)
         self._minute_written: dict[str, dict[str, set]] = {}
         self._tasks: list[asyncio.Task] = []
         self._stopping = asyncio.Event()
@@ -60,6 +61,8 @@ class SeriesStore:
     async def on_sample(self, node_id: str, frame: SampleFrame) -> None:
         node_rings = self.rings.setdefault(node_id, {})
         maxlen = max(int(RAW_HOLD_S / self._interval()), 300)
+        slot_ms = RAW_DECIMATE_S * 1000
+        buf = self._raw_buf.setdefault(node_id, {})
         for name, v in frame.series.items():
             if v is None and name not in node_rings:
                 continue  # unknown + null → don't create phantom series
@@ -69,11 +72,17 @@ class SeriesStore:
             ring.push(frame.ts, v)
             if v is None:
                 continue
-            # raw table decimation (10s): keep the newest sample in each slot
-            slot = frame.ts // (RAW_DECIMATE_S * 1000)
-            prev = self._raw_buf.get(node_id, {}).get(name)
-            if prev is None or prev[0] < slot * (RAW_DECIMATE_S * 1000):
-                self._raw_buf.setdefault(node_id, {})[name] = (slot * RAW_DECIMATE_S * 1000, v)
+            # raw-table decimation: one row per 10s slot; when a slot closes the
+            # previous slot's freshest value moves into the pending list
+            slot = frame.ts // slot_ms
+            cur = buf.get(name)
+            if cur and slot > cur["slot"]:
+                self._raw_pending.append((cur["slot"] * slot_ms, node_id, name, cur["v"]))
+                buf[name] = {"slot": slot, "v": v}
+            elif cur:
+                cur["v"] = v
+            else:
+                buf[name] = {"slot": slot, "v": v}
 
     def _interval(self) -> float:
         try:
@@ -211,10 +220,11 @@ class SeriesStore:
                 await self._prune()
 
     async def _flush(self) -> None:
-        raw_rows: list[tuple] = []
+        raw_rows = list(self._raw_pending)
+        self._raw_pending = []
         for node_id, names in self._raw_buf.items():
-            for name, (ts, v) in list(names.items()):
-                raw_rows.append((int(ts), node_id, name, v))
+            for name, entry in list(names.items()):
+                raw_rows.append((int(entry["slot"] * RAW_DECIMATE_S * 1000), node_id, name, entry["v"]))
                 del names[name]
         if raw_rows:
             await self._bulk_insert(

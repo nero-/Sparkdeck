@@ -230,3 +230,94 @@ export function usePollingQuery<T>(fetcher: () => Promise<T>, everyMs: number): 
 }
 
 export type { ChatStatsFrame };
+
+/* ---------------------------------------------------------------------------
+   useHistory — polled metrics-history query with calm stale-while-refresh:
+   keeps the last good body visible while the next poll lands (charts then
+   morph into the new window within one beat).
+   --------------------------------------------------------------------------- */
+
+export interface HistoryQueryState {
+  /** last successful body (may be from the previous args while refetching) */
+  data: HistoryResponse | null;
+  /** true after the FIRST args resolve/promise rejection settles */
+  loading: boolean;
+  error: unknown;
+  reload: () => void;
+}
+
+export function useHistory(args: MetricsHistoryArgs | null | undefined): HistoryQueryState {
+  const key =
+    args === null || args === undefined
+      ? ''
+      : JSON.stringify([
+          args.nodeId ?? null,
+          args.clusterId ?? null,
+          args.names,
+          args.window,
+          args.maxPoints ?? 700,
+        ]);
+
+  const [data, setData] = useState<HistoryResponse | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [loading, setLoading] = useState(args !== null && args !== undefined);
+  const [tick, setTick] = useState(0);
+
+  const recall = useCallback((argsInner: MetricsHistoryArgs): void => {
+    void metricsHistory(argsInner)
+      .then((d) => {
+        setData(d);
+        setError(null);
+        setLoading(false);
+      })
+      .catch((e: unknown) => {
+        setError(e);
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (args === null || args === undefined) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const runOnce = () => {
+      void (async () => {
+        try {
+          const d = await metricsHistory(args);
+          if (!active) return;
+          setData(d);
+          setError(null);
+          setLoading(false);
+        } catch (e) {
+          if (!active) return;
+          setError(e);
+          setLoading(false);
+        } finally {
+          if (active) schedule(windowPollMs(args.window));
+        }
+      })();
+    };
+
+    const schedule = (ms: number) => {
+      timer = setTimeout(() => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          schedule(ms);
+          return;
+        }
+        runOnce();
+      }, ms);
+    };
+
+    runOnce();
+    return () => {
+      active = false;
+      if (timer !== null) clearTimeout(timer);
+    };
+    // args identity is identifier-stable via `key`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, tick]);
+
+  const reload = useCallback(() => setTick((t) => t + 1), []);
+  return { data, error, loading, reload };
+}

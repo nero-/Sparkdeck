@@ -138,11 +138,10 @@ export function useNodeRings(nodeId: ID | null | undefined, seriesIds: readonly 
 export function useNodeRingLast(nodeId: ID | null | undefined, seriesId: string): number | null {
   wire();
   const idOrEmpty = nodeId ?? '';
-  const seq = useRingVersion(
-    // `void s.version` keeps the selector honest (uses the store input) without
-    // turning global bumps of OTHER series into re-renders of this one.
-    (s) => (void s.version) || (seqs.get(ringKey(idOrEmpty, seriesId)) ?? 0),
-  );
+  const seq = useRingVersion((s) => {
+    void s.version; // touch the store so the selector participates in updates
+    return seqs.get(ringKey(idOrEmpty, seriesId)) ?? 0;
+  });
   const entry = useMemo(() => rings.get(ringKey(idOrEmpty, seriesId)) ?? EMPTY_RING, [idOrEmpty, seriesId, seq]);
   const n = entry.v.length;
   const last = n > 0 ? entry.v[n - 1] : null;

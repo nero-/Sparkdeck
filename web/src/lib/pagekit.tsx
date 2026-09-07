@@ -1,11 +1,12 @@
 /* ============================================================================
    lib/pagekit — shared page pieces for the settings/bench/images waves:
    Drawer (right sheet), CodeBlock, NumField, FieldMsg, api-error copy,
-   OpDrawer (live op detail w/ steps + terminal), TokenUnlockModal + useAuthGate.
+   DataTable, DirtySave, OpDrawer (live op detail w/ steps + terminal),
+   TokenGate host (401 unlock modal storing localStorage['sparkdeck.token']).
    Built strictly on the ds barrel + pinned API contract.
    ========================================================================= */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { KeyRound, X } from 'lucide-react';
 import { cn } from './cn';
@@ -163,6 +164,132 @@ export function CodeBlock({
 }
 
 /* ---------------------------------------------------------------------------
+   DataTable — dense 13px operator table (DESIGN "Tables"): sticky header,
+   right-aligned numerics opt-in, hairline row rules.
+   --------------------------------------------------------------------------- */
+
+export interface DataColumn {
+  key: string;
+  label: string;
+  align?: 'left' | 'right';
+  title?: string;
+  width?: string;
+}
+
+export function DataTable({
+  columns,
+  children,
+  empty,
+  minWidth = 640,
+  className,
+}: {
+  columns: DataColumn[];
+  children: ReactNode;
+  empty?: string;
+  minWidth?: number;
+  className?: string;
+}) {
+  return (
+    <div className={cn('min-w-0 overflow-x-auto', className)}>
+      <table className="w-full border-separate border-spacing-0" style={{ minWidth }}>
+        <thead>
+          <tr>
+            {columns.map((c) => (
+              <th
+                key={c.key}
+                title={c.title}
+                className={cn(
+                  'sd-monolabel sticky top-0 z-[1] border-b border-stroke bg-bg1 px-2 py-1.5 font-medium',
+                  c.align === 'right' ? 'text-right' : 'text-left',
+                )}
+                style={{ width: c.width }}
+              >
+                {c.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="text-sm">{children}</tbody>
+      </table>
+      {empty !== undefined && (
+        <div className="px-2 py-6 text-center text-xs text-low">{empty}</div>
+      )}
+    </div>
+  );
+}
+
+export function Td({
+  children,
+  align = 'left',
+  num = false,
+  className,
+  title,
+  colSpan,
+}: {
+  children: ReactNode;
+  align?: 'left' | 'right';
+  num?: boolean;
+  className?: string;
+  title?: string;
+  colSpan?: number;
+}) {
+  return (
+    <td
+      colSpan={colSpan}
+      title={title}
+      className={cn(
+        'border-b border-stroke px-2 py-1.5 align-middle',
+        align === 'right' ? 'text-right' : 'text-left',
+        num && 'sd-num font-mono',
+        className,
+      )}
+    >
+      {children}
+    </td>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   DirtySave — standard footer for patch-a-section forms
+   --------------------------------------------------------------------------- */
+
+export function DirtySave({
+  dirty,
+  valid,
+  saving,
+  error,
+  onSave,
+  onReset,
+  saveLabel = 'Save',
+  extraHint,
+}: {
+  dirty: boolean;
+  valid: boolean;
+  saving: boolean;
+  error: unknown;
+  onSave: () => void;
+  onReset: () => void;
+  saveLabel?: string;
+  extraHint?: ReactNode;
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-stroke pt-3">
+      <Btn variant="primary" size="sm" disabled={!dirty || !valid} loading={saving} onClick={onSave}>
+        {saveLabel}
+      </Btn>
+      {dirty && (
+        <Btn variant="ghost" size="sm" disabled={saving} onClick={onReset}>
+          Discard
+        </Btn>
+      )}
+      {dirty && !valid && <FieldMsg tone="hint">fix the invalid fields to save</FieldMsg>}
+      {dirty && valid && extraHint}
+      {error !== null && <FieldMsg tone="error">{errCopy(error)}</FieldMsg>}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------------
    Drawer — right-side sheet (portal + Esc + scrim + focus restore)
    --------------------------------------------------------------------------- */
 
@@ -298,14 +425,13 @@ export function useLiveOp(opId: string | null): OpRecord | null {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = (errors: number, delayMs = 2500): void => {
-      // stop while the store holds a live copy (ws upserts take over)
       api
         .op(opId)
         .then((op) => {
           if (!active) return;
           setFetched(op);
           if (op.state === 'queued' || op.state === 'running') {
-            timer = setTimeout(() => poll(0, 2500), delayMs);
+            timer = setTimeout(() => poll(0, delayMs), delayMs);
           }
         })
         .catch(() => {
@@ -397,13 +523,7 @@ export function OpDetailBody({ op }: { op: OpRecord }) {
   );
 }
 
-export function OpDrawer({
-  opId,
-  onClose,
-}: {
-  opId: string | null;
-  onClose: () => void;
-}) {
+export function OpDrawer({ opId, onClose }: { opId: string | null; onClose: () => void }) {
   const op = useLiveOp(opId);
   return (
     <Drawer
@@ -427,9 +547,31 @@ export function OpDrawer({
 /* ---------------------------------------------------------------------------
    Token unlock gate — pinned localStorage['sparkdeck.token'].
    A global 401 intercept would belong in client.ts/App.tsx (pinned / another
-   wave's file), so pages mount `{gate.ui}` and call `gate.offer(error)` on
-   any 401 they observe.
+   wave's file), so pages render <TokenGateHost/> once and any module can call
+   offerAuthGate(error) on a 401 it observes.
    --------------------------------------------------------------------------- */
+
+const gateListeners = new Set<() => void>();
+
+/** Call on any failing request — opens the unlock modal when it's a 401. */
+export function offerAuthGate(e: unknown): void {
+  if (!isUnauthorized(e)) return;
+  for (const l of gateListeners) l();
+}
+
+export function TokenGateHost({ onUnlocked }: { onUnlocked: () => void }): ReactNode {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const openIt = (): void => setOpen(true);
+    gateListeners.add(openIt);
+    return () => {
+      gateListeners.delete(openIt);
+    };
+  }, []);
+  return (
+    <TokenUnlockModal open={open} onClose={() => setOpen(false)} onUnlocked={onUnlocked} />
+  );
+}
 
 function TokenUnlockModal({
   open,
@@ -487,21 +629,4 @@ function TokenUnlockModal({
       </div>
     </Modal>
   );
-}
-
-/** Hook: mount `{gate.ui}`, call `gate.offer(error)` on any failing call. */
-export function useAuthGate(onUnlocked: () => void): {
-  offer: (e: unknown) => void;
-  ui: ReactNode;
-} {
-  const [open, setOpen] = useState(false);
-  const close = useCallback(() => setOpen(false), []);
-  const offer = useCallback(
-    (e: unknown) => {
-      if (isUnauthorized(e)) setOpen(true);
-    },
-    [],
-  );
-  const ui = <TokenUnlockModal open={open} onClose={close} onUnlocked={onUnlocked} />;
-  return { offer, ui };
 }
