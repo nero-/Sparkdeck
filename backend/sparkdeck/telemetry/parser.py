@@ -110,6 +110,9 @@ def service_state_from(frame: dict, cluster_id: str, prev: ServiceState | None) 
     st.port = v.get("port")
     st.model = v.get("model") or (prev.model if prev else None)
     st.served_models = v.get("models") or (prev.served_models if prev else [])
+    up_s = g.get("uptime_s")
+    if up_s is not None:
+        st.age_s = float(up_s)
     metrics: dict[str, float] = {}
     for k, val in (g or {}).items():
         if isinstance(val, (int, float)):

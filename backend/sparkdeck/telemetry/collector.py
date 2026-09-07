@@ -631,6 +631,9 @@ def probe_vllm(delta: dict, cache: dict, api_port: int, candidates: list, now: i
         preem = gv("vllm:num_preemptions_total", "vllm:num_preemptions")
         if preem is not None:
             g["preemptions"] = preem
+        pstart = gv("vllm:process_start_time_seconds")
+        if pstart is not None and pstart > 0:
+            g["uptime_s"] = round(max(0.0, now / 1000.0 - pstart), 1)
         ttft = hn("vllm:time_to_first_token_seconds")
         if ttft:
             prev_hist = cache["data"].get("h", {}).get("ttft")

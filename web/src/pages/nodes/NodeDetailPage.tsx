@@ -101,7 +101,7 @@ const ALERT_DEFAULTS: AppAlerts = {
 /** Build the default chart layout from the latest sample frame. Dynamic ids
     (net ifaces, temp zones, docker containers, vllm) follow the sample; when
     no frame has arrived yet the static groups stay and the dynamic ones wait. */
-function buildLayout(node: NodeConfig, sample: SampleFrame | undefined, isHead: boolean): TileDef[] {
+function buildLayout(sample: SampleFrame | undefined, isHead: boolean): TileDef[] {
   const s = sample?.series;
   const has = (id: string): boolean => typeof s?.[id] === 'number';
   const present = (id: string): boolean => s !== undefined && id in s;
@@ -382,8 +382,8 @@ function NodeDashboard({
   const age = useSampleAge(live);
 
   const tiles = useMemo(
-    () => withMemHorizons(buildLayout(node, sample, isHead), alertsv),
-    [node, sample, isHead, alertsv],
+    () => withMemHorizons(buildLayout(sample, isHead), alertsv),
+    [sample, isHead, alertsv],
   );
 
   const allNames = useMemo(() => tiles.flatMap((t) => t.series.map((x) => x.id)), [tiles]);
