@@ -403,7 +403,13 @@ def attach(app, a) -> None:
                 lines_q.append(l)
 
         async def gen():
-            task = asyncio.create_task(rt.stream_exec(cmd, timeout=14400, on_line=on_line))
+            try:
+                task = asyncio.create_task(rt.stream_exec(cmd, timeout=14400, on_line=on_line))
+            except Exception as exc:
+                yield "data: " + json.dumps({"key": f"{node_id}:{container}", "node_id": node_id,
+                                             "container": container, "lines": [f"!! stream unavailable: {exc!r}"],
+                                             "eof": True}) + "\n\n"
+                return
             try:
                 while True:
                     if lines_q:
