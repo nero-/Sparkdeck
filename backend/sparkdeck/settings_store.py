@@ -4,6 +4,7 @@ settings), including the seed of the operator's real two-cluster setup.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .db import DB, jdumps, jloads
@@ -148,11 +149,26 @@ async def seed_if_empty(db: DB) -> None:
 
 def default_app_settings() -> AppSettings:
     s = AppSettings()
-    if Path(
-        "/home/kal/Agent/Builds/glm53-flash-dgx-spark-tp2/bench/llm_decode_bench.py"
-    ).exists():
-        s.bench.bench_repo_dir = "/home/kal/Agent/Builds/glm53-flash-dgx-spark-tp2/bench"
-        s.bench.venv_python = "/home/kal/Agent/Builds/glm53-flash-dgx-spark-tp2/bench/.venv/bin/python"
+    # Auto-detect the operator's bench repo (a directory containing
+    # llm_decode_bench.py). $SPARKDECK_BENCH_DIR wins; otherwise look at
+    # common Sibling locations of this install (the glm TP2 build dir).
+    candidates: list[Path] = []
+    env_dir = os.environ.get("SPARKDECK_BENCH_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    home = Path.home()
+    candidates += [
+        home / "Agent" / "Builds" / "glm53-flash-dgx-spark-tp2" / "bench",
+        home / "builds" / "glm53-flash-dgx-spark-tp2" / "bench",
+        Path("/opt/glm53-flash-dgx-spark-tp2/bench"),
+    ]
+    for cand in candidates:
+        if (cand / "llm_decode_bench.py").exists():
+            s.bench.bench_repo_dir = str(cand)
+            venv = cand / ".venv" / "bin" / "python"
+            if venv.exists():
+                s.bench.venv_python = str(venv)
+            break
     return s
 
 
