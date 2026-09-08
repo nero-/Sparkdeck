@@ -83,10 +83,17 @@ JSON present & parseable** (the tool exits 0 even on dead servers), feeds
   green against the **mock world** over a real uvicorn server.
 - Parsers + LTTB + bench `summarize` unit-tested (incl. both vLLM metric
   generations and the 83-field CellResult shape).
-- **Real hardware**: doctor probes all 4 GB10 nodes (SSH + auth + versions),
-  collector auto-deploy + NDJSON stream verified on gx10-r2 (serving GLM-5.3
-  at the time), and one minimal real bench (C=1, ctx 0, 8 s) through the
-  full runner pipeline → summary grid + run report, no side effects on the
-  serving pair.
+- **Real hardware**: all 4 GB10 nodes connect; collector deploys + streams on
+  every node; both pairs serving GLM-5.3-Flash parsed live (KV/TTFT metrics,
+  engine uptime from `process_start_time_seconds`); one minimal real bench
+  (C=1, ctx 0, 8 s) through the full runner pipeline → summary grid + run
+  report; production UI verified against live data (metrics, env files,
+  images inventory, bench history import).
+- Frontend: strict tsc clean project-wide, production bundle green; every
+  page verified against the mock world with zero console errors; a full
+  adversarial review pass (13 findings) applied — WS node snapshot shape,
+  chart rebind on empty windows, chat-stream abort on unmount, map caps,
+  SSE CRLF, logs auto-reconnect, settings draft dirty-gating, ring eviction,
+  nested-modal Escape stack, OS theme listener.
 - Lifecycle WRITE ops against the real pair intentionally require the
   operator (mock-disabled); the console gates them behind typed confirmations.
