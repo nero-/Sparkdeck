@@ -1,9 +1,0 @@
-argv output abs: 8k
-bench wall 0.4s — state: error exit: -1
-error: TypeError: a bytes-like object is required, not 'str'
-engine: None server: None spec_avg: None
-best: None | c1: None
-prefill: None
-report: {'rc': 1, 'error': 'no result file yet'}
-jobs stored: [('f894fc4d50f3', 'error', 'sparkdeck-smoke')]
-DONE
