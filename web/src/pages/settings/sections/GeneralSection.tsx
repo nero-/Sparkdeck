@@ -2,12 +2,12 @@
    interval, retention windows. Sampling/retention take effect on the next
    collector connect; a server restart re-uses the db so values survive. */
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { Chip, toast } from '../../../ds';
 import { cn } from '../../../lib/cn';
 import { DirtySave, FieldMsg, NumField } from '../../../lib/pagekit';
 import { useUi, type Density, type ThemeChoice } from '../../../stores/ui';
-import type { SettingsPatch, SettingsGate } from '../useSettingsState';
+import { useDraftGate, type SettingsPatch, type SettingsGate } from '../useSettingsState';
 import { SectionWrap } from '../SectionWrap';
 
 /** Local aliases; the wire fields live in AppSettings.retention. */
@@ -32,16 +32,23 @@ export function GeneralSection({ gate }: { gate: SettingsGate }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  useEffect(() => {
-    if (s === null) return;
-    setSrvTheme(s.appearance.theme);
-    setSrvDensity(s.appearance.density);
-    setIntervalS(s.sampling_interval_s);
-    setRet({ rawHours: s.retention.raw_hours, oneMinDays: s.retention.minute_days, tenMinDays: s.retention.decaminute_days });
-  }, [s]);
+  const dirtyRef = useRef(false);
+  useDraftGate(
+    s !== null
+      ? { theme: s.appearance.theme, density: s.appearance.density, interval: s.sampling_interval_s, ret: s.retention }
+      : null,
+    dirtyRef,
+    (fresh) => {
+      setSrvTheme(fresh.theme);
+      setSrvDensity(fresh.density);
+      setIntervalS(fresh.interval);
+      setRet({ rawHours: fresh.ret.raw_hours, oneMinDays: fresh.ret.minute_days, tenMinDays: fresh.ret.decaminute_days });
+    },
+  );
 
   const setRetentionKey = (k: keyof RetLocal) => (v: number | null) =>
     setRet((cur) => ({ ...cur, [k]: v ?? cur[k] }));
+
 
   const intervalOk = intervalS !== null && Number.isFinite(intervalS) && intervalS >= 1 && intervalS <= 10;
   const retentionValid =
@@ -57,6 +64,8 @@ export function GeneralSection({ gate }: { gate: SettingsGate }) {
       ret.rawHours !== s.retention.raw_hours ||
       ret.oneMinDays !== s.retention.minute_days ||
       ret.tenMinDays !== s.retention.decaminute_days);
+
+  dirtyRef.current = dirty;
 
   const reset = (): void => {
     setSrvTheme(s?.appearance.theme ?? 'dark');

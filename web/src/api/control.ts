@@ -217,10 +217,16 @@ export function subscribeLogStream(
         const { done, value } = await reader.read();
         if (stopped) return;
         if (done) {
+          buf = buf.replace(/\r\n/g, '\n');
+          if (buf.trim() !== '') {
+            const frame = parseSseFrame(buf); // flush final unterminated block
+            if (frame !== null) onFrame(frame);
+          }
           emit('closed');
           return;
         }
         buf += dec.decode(value, { stream: true });
+        buf = buf.replace(/\r\n/g, '\n'); // CRLF-normalize (proxy-safe)
         let idx = buf.indexOf('\n\n');
         while (idx !== -1) {
           const block = buf.slice(0, idx);

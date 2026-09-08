@@ -376,7 +376,7 @@ export function TimeChart({
   });
 
   return (
-    <div className={cn('flex min-w-0 flex-col', className)}>
+    <div className={cn('relative flex min-w-0 flex-col', className)}>
       {(series.length > 0 || live) && (
         <div className="mb-1.5 flex min-h-[22px] flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1">{legendChips}</div>
@@ -394,10 +394,11 @@ export function TimeChart({
           )}
         </div>
       )}
-      {hasAnyData ? (
-        <div ref={wrapRef} style={{ height }} className="w-full min-w-0" />
-      ) : (
-        <div style={{ height }} className="flex w-full items-center justify-center">
+      {/* host div is ALWAYS mounted (echarts binds to it at init; conditional
+          rendering would detach the instance when data swings 0 → N → 0) */}
+      <div ref={wrapRef} style={{ height }} className="w-full min-w-0" />
+      {!hasAnyData && (
+        <div className="pointer-events-none absolute inset-0 flex w-full items-center justify-center">
           <Empty title={emptyMessage} className="py-2" />
         </div>
       )}

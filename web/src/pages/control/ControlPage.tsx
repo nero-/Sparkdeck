@@ -9,7 +9,7 @@
    the exact remote commands it will run (DESIGN.md "Confirmations").
    ========================================================================= */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   ChevronRight,
@@ -32,18 +32,20 @@ import {
   Empty,
   Panel,
   Select,
+  Spinner,
+  StatusDot,
+  Tabs,
   Tip,
   connDot,
   healthDot,
   toast,
 } from '../../ds';
-import { Spinner } from '../../ds/primitives';
 import { Terminal } from '../../ds/terminal';
 import { cn } from '../../lib/cn';
 import { fmtCompact, fmtDuration } from '../../lib/format';
 import { api, isApiClientError } from '../../api/client';
 import { useClusters, useQuery } from '../../api/queries';
-import { useLive, useLiveNodes, useServiceState } from '../../stores/live';
+import { useLive, useLiveNodes, useServiceByCluster } from '../../stores/live';
 import { useUi } from '../../stores/ui';
 import { cancelOp } from '../../api/control';
 import type {
@@ -294,8 +296,6 @@ export default function ControlPage() {
    --------------------------------------------------------------------------- */
 
 function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent: string }) {
-  const now = useNow(1000);
-
   /* live aggregate poll — ~6 s floor; WS service frames cover the fast path */
   const liveFetcher = useCallback(
     (): Promise<ClusterLive> =>
@@ -308,8 +308,9 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   const liveQ = useQuery(liveFetcher);
   usePollInterval(liveQ.reload, 6000, true);
 
-  /* full cluster op audit: GET /api/ops?cluster_id= merged into the store */
-  const [, setOpsTick] = useState(0);
+  /* full cluster op audit: GET /api/ops?cluster_id= merged into the store
+     (the WS `ops` topic only carries live upserts — completed history is
+     filled from this 30 s audit pull) */
   useEffect(() => {
     let dead = false;
     const pull = (): void => {
@@ -327,7 +328,6 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
       clearInterval(t);
     };
   }, [cluster.id]);
-  const refreshOps = useCallback(() => setOpsTick((t) => t + 1), []);
 
   /* poll active ops over REST as well (covers a dead websocket) */
   const activeOpIds = useLive(
@@ -352,8 +352,10 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
     return () => clearInterval(t);
   }, [activeOpIds.join(','), cluster.id]);
 
-  /* service state: WS topic first, REST live aggregate as fallback */
-  const wsService = useServiceState(cluster.id);
+  /* service state: WS topic first (via useServiceByCluster), REST live
+     aggregate as fallback while the socket is quiet */
+  const serviceMap = useServiceByCluster();
+  const wsService = serviceMap[cluster.id];
   const restService = liveQ.data?.service ?? null;
   const svc =
     wsService ??
@@ -379,6 +381,7 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   const anyBusy = opsForCluster.some((o) => isOpActive(o));
 
   /* action plumbing */
+  const [pane, setPane] = useState<'pair' | 'ops'>('pair');
   const [startOpen, setStartOpen] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
   const [preflightOpen, setPreflightOpen] = useState(false);
@@ -386,11 +389,15 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   const [gidsOp, setGidsOp] = useState<{ id: ID | null; node: string }>({ id: null, node: '' });
 
   const submit = useCallback(
-    async (label: string, p: Promise<{ op_id: string }>): Promise<boolean> => {
+    async (
+      label: string,
+      p: Promise<{ op_id: string }>,
+      onAccepted?: (opId: string) => void,
+    ): Promise<boolean> => {
       try {
         const r = await p;
         toast.ok(`${label} submitted`, `op ${r.op_id}`);
-        setOpLog({ id: r.op_id, title: label });
+        onAccepted?.(r.op_id);
         return true;
       } catch (e) {
         toast.error(`${label} failed`, e instanceof Error ? e.message : String(e));
@@ -415,6 +422,7 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
           skip_preflight: v.skip_preflight,
           extra: v.extra.trim() === '' ? null : v.extra.trim(),
         }),
+        () => setPane('ops'), // POST start → route to the ops console view
       );
       if (!ok) throw new Error('start rejected');
     },
@@ -424,7 +432,27 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   const doPreflight = useCallback(
     async (): Promise<void> => {
       setPreflightOpen(false);
-      await submit('cluster.preflight', preflightCluster(cluster.id));
+      await submit('cluster.preflight', preflightCluster(cluster.id), (id) =>
+        setOpLog({ id, title: 'cluster.preflight' }),
+      );
+    },
+    [cluster.id, submit],
+  );
+
+  const doCheck = useCallback(
+    async (profileKey: string | null): Promise<void> => {
+      await submit('cluster.check', checkCluster(cluster.id, profileKey), (id) =>
+        setOpLog({ id, title: 'cluster.check' }),
+      );
+    },
+    [cluster.id, submit],
+  );
+
+  const doVerify = useCallback(
+    async (profileKey: string): Promise<void> => {
+      await submit('cluster.verify', verifyCluster(cluster.id, profileKey), (id) =>
+        setOpLog({ id, title: 'cluster.verify' }),
+      );
     },
     [cluster.id, submit],
   );
@@ -432,63 +460,131 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   const doStop = useCallback(
     async (): Promise<void> => {
       setStopOpen(false);
-      await submit('cluster.stop', stopCluster(cluster.id));
+      await submit('cluster.stop', stopCluster(cluster.id), () => setPane('ops'));
     },
     [cluster.id, submit],
   );
 
-  /* exact remote commands for the confirms (Tp2Verbs shapes) */
-  const downCommands = useMemo(() => {
-    const ctl = cluster.control;
-    return `cd ${ctl.serve_dir} && bash ${ctl.launcher} --down 2>&1`;
-  }, [cluster]);
+  /* exact remote commands for the confirm (Tp2Verbs shapes): head first, then
+     worker, each `--down` in the serve dir */
   const headName = headNodeOf(cluster)?.name ?? 'head';
   const workerName = workerNodeOf(cluster)?.name ?? 'worker';
-
-  const verifyKey = view.profileKey ?? cluster.profiles[0]?.key ?? null;
+  const stopCommands = useMemo(() => {
+    const ctl = cluster.control;
+    const cmd = `cd ${ctl.serve_dir} && bash ${ctl.launcher} --down 2>&1`;
+    return [`${cmd}    # head: ${headName}`, `${cmd}    # worker: ${workerName}`];
+  }, [cluster]);
+  const verifyKey = view.profileKey;
+  const serving = view.health === 'up' || view.image !== null; // "when served" — uptime/model only then
 
   return (
     <>
-      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-[var(--sd-card-gap)] xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        {/* left column */}
-        <div className="flex min-w-0 flex-col gap-[var(--sd-card-gap)]">
-          <ProfilesGrid
-            cluster={cluster}
-            accent={accent}
-            service={view}
-            now={now}
-            onCheck={(key) => void submit('cluster.check', checkCluster(cluster.id, key)).then(() => undefined)}
-            onVerify={(key) => void submit('cluster.verify', verifyCluster(cluster.id, key)).then(() => undefined)}
+      {/* header row — cluster identity + accent, service health chip, served
+          facts, the two big lifecycle verbs (spec: header row) */}
+      <Panel className="mb-[var(--sd-card-gap)]">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3">
+          <span
+            aria-hidden
+            className="h-9 w-1 shrink-0 rounded-full"
+            style={{ background: accent }}
           />
-          <ServiceStatus
-            service={view}
-            anyBusy={anyBusy}
-            onStart={() => setStartOpen(true)}
-            onPreflight={() => setPreflightOpen(true)}
-            onCheck={() => void doCheck(cluster, submit)}
-            onVerify={() => verifyKey !== null && void submit('cluster.verify', verifyCluster(cluster.id, verifyKey))}
-            onStop={() => setStopOpen(true)}
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="truncate text-[17px] font-semibold text-hi">{cluster.name}</span>
+            <span className="truncate font-mono text-2xs text-low" title={cluster.control.serve_dir}>
+              {cluster.control.launcher} · {cluster.control.serve_dir}
+            </span>
+          </div>
+          <Chip
+            variant={
+              view.health === 'up' ? 'ok' : view.health === 'degraded' ? 'warn' : view.health === 'down' ? 'crit' : 'neutral'
+            }
+            title="service health — live from the WS service topic"
+          >
+            <StatusDot state={healthDot(view.health)} size={7} />
+            {view.health}
+          </Chip>
+          {serving && (
+            <div className="hidden min-w-0 items-center gap-5 lg:flex xl:flex">
+              <KeyRowView label="image" value={view.image ?? '—'} mono title={view.image ?? undefined} />
+              <KeyRowView label="uptime" value={view.ageS !== null ? fmtDuration(view.ageS) : '—'} mono />
+              <KeyRowView label="model" value={view.model ?? view.servedModels[0] ?? '—'} mono />
+            </div>
+          )}
+          <div className="flex-1" />
+          <Tabs
+            variant="chip"
+            ariaLabel="control page view"
+            value={pane}
+            onChange={(id) => setPane(id === 'ops' ? 'ops' : 'pair')}
+            tabs={[
+              { id: 'pair', label: 'Pair console' },
+              { id: 'ops', label: 'Ops console', badge: anyBusy ? <Chip variant="accent" className="ml-1 px-1 py-0">●</Chip> : undefined },
+            ]}
           />
-          <EnvInspector cluster={cluster} serviceProfileKey={view.profileKey} />
+          <Btn
+            variant="primary"
+            icon={<Play size={15} />}
+            onClick={() => setStartOpen(true)}
+            disabled={anyBusy}
+            title={anyBusy ? 'an op is already running — one lifecycle op at a time' : 'bring the pair up (profile + health timeout)'}
+          >
+            Start…
+          </Btn>
+          <Btn
+            variant="danger"
+            icon={<Square size={15} />}
+            onClick={() => setStopOpen(true)}
+            disabled={anyBusy}
+            title={anyBusy ? 'an op is already running — wait for it' : 'bring the pair down (confirmed with exact commands)'}
+          >
+            Stop pair…
+          </Btn>
         </div>
+      </Panel>
 
-        {/* right column */}
-        <div className="flex min-w-0 flex-col gap-[var(--sd-card-gap)]">
-          <NodeFacts
-            cluster={cluster}
-            nodeStateOf={nodeStateOf}
-            ops={opsForCluster}
-            onShowGids={(nodeId, nodeName) => {
-              void showGids(nodeId)
-                .then((r) => setGidsOp({ id: r.op_id, node: nodeName }))
-                .catch((e: unknown) => {
-                  toast.error('show-gids failed', e instanceof Error ? e.message : String(e));
-                });
-            }}
-          />
-          <OpsTimeline clusterId={cluster.id} />
+      {pane === 'ops' ? (
+        <OpsConsole clusterId={cluster.id} />
+      ) : (
+        <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-[var(--sd-card-gap)] xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          {/* left column */}
+          <div className="flex min-w-0 flex-col gap-[var(--sd-card-gap)]">
+            <ProfilesGrid
+              cluster={cluster}
+              accent={accent}
+              service={view}
+              onCheck={(key) => void doCheck(key)}
+              onVerify={(key) => void doVerify(key)}
+            />
+            <ServiceStatus
+              service={view}
+              anyBusy={anyBusy}
+              onPreflight={() => setPreflightOpen(true)}
+              onCheck={() => void doCheck(null)}
+              onVerify={() => {
+                if (verifyKey !== null) void doVerify(verifyKey);
+              }}
+            />
+            <EnvInspector cluster={cluster} serviceProfileKey={view.profileKey} />
+          </div>
+
+          {/* right column */}
+          <div className="flex min-w-0 flex-col gap-[var(--sd-card-gap)]">
+            <NodeFacts
+              cluster={cluster}
+              nodeStateOf={nodeStateOf}
+              ops={opsForCluster}
+              onShowGids={(nodeId, nodeName) => {
+                void showGids(nodeId)
+                  .then((r) => setGidsOp({ id: r.op_id, node: nodeName }))
+                  .catch((e: unknown) => {
+                    toast.error('show-gids failed', e instanceof Error ? e.message : String(e));
+                  });
+              }}
+            />
+            <OpsTimeline clusterId={cluster.id} />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ---- modals ---- */}
       <StartDialog
@@ -506,15 +602,12 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
         title="Stop the serving pair?"
         summary={
           <>
-            Stops both rank containers and confirms teardown. The served model
-            goes away for <strong className="text-hi">every consumer on this machine</strong>. Runs
-            the head first, then the worker.
+            Runs the head <span className="font-mono text-hi">--down</span>, then the worker. Serving stops for that
+            cluster — <strong className="text-hi">every consumer of the model (OWUI/Hermes/DSH)</strong> loses it
+            until the next start.
           </>
         }
-        commands={[
-          `${downCommands.cmd}   # head: ${headName}`,
-          `${downCommands.cmd}   # worker: ${workerName}`,
-        ]}
+        commands={stopCommands}
         confirmWord="stop"
         confirmLabel="Stop pair"
       />
@@ -547,11 +640,6 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   );
 }
 
-/* cluster.check helper kept a free function so the button wiring stays honest */
-function doCheck(cluster: ClusterTopology, submit: (label: string, p: Promise<{ op_id: string }>) => Promise<boolean>): void {
-  void submit('cluster.check', checkCluster(cluster.id, null));
-}
-
 /* ---------------------------------------------------------------------------
    Profiles grid — the 4 GLM-5.3-Flash serving profiles from the topology
    --------------------------------------------------------------------------- */
@@ -560,14 +648,12 @@ function ProfilesGrid({
   cluster,
   accent,
   service,
-  now,
   onCheck,
   onVerify,
 }: {
   cluster: ClusterTopology;
   accent: string;
   service: ServiceView;
-  now: number;
   onCheck: (key: string) => void;
   onVerify: (key: string) => void;
 }) {
@@ -582,7 +668,6 @@ function ProfilesGrid({
             serving={servingKey === p.key}
             uptimeS={servingKey === p.key ? service.ageS : null}
             accent={accent}
-            now={now}
             onCheck={() => onCheck(p.key)}
             onVerify={() => onVerify(p.key)}
           />
@@ -609,9 +694,7 @@ function ProfileCard({
   accent: string;
   onCheck: () => void;
   onVerify: () => void;
-  now: number;
 }) {
-  void now;
   const facts: [string, ReactNode][] = [
     ['kv pin', profile.kv_pin_gib !== null && profile.kv_pin_gib !== undefined ? `${profile.kv_pin_gib} GiB` : '—'],
     ['context', profile.context !== null && profile.context !== undefined ? fmtCompact(profile.context) : '—'],
@@ -681,19 +764,15 @@ function ProfileCard({
 function ServiceStatus({
   service,
   anyBusy,
-  onStart,
   onPreflight,
   onCheck,
   onVerify,
-  onStop,
 }: {
   service: ServiceView;
   anyBusy: boolean;
-  onStart: () => void;
   onPreflight: () => void;
   onCheck: () => void;
   onVerify: () => void;
-  onStop: () => void;
 }) {
   const healthVariant =
     service.health === 'up'
@@ -749,16 +828,6 @@ function ServiceStatus({
 
       <div className="flex flex-wrap items-center gap-2 border-t border-stroke px-4 py-2.5">
         <Btn
-          variant="primary"
-          size="sm"
-          icon={<Play size={13} />}
-          onClick={onStart}
-          disabled={anyBusy}
-          title={anyBusy ? 'an op is running — one lifecycle op at a time' : 'start the pair (profile picker)'}
-        >
-          Start…
-        </Btn>
-        <Btn
           variant="ghost"
           size="sm"
           icon={<ListChecks size={13} />}
@@ -788,17 +857,8 @@ function ServiceStatus({
         >
           Verify
         </Btn>
+        <span className="text-2xs text-low">Start/Stop live in the header row — one lifecycle op at a time.</span>
         <div className="flex-1" />
-        <Btn
-          variant="danger"
-          size="sm"
-          icon={<Square size={13} />}
-          onClick={onStop}
-          disabled={anyBusy}
-          title={anyBusy ? 'an op is running — wait for it' : 'stop the pair (confirm with exact commands)'}
-        >
-          Stop pair…
-        </Btn>
       </div>
     </Panel>
   );
@@ -1120,6 +1180,141 @@ function stepVariant(state: OpRecord['steps'][number]['state']): 'neutral' | 'ok
     default:
       return 'neutral';
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Ops console view — the full operational surface: live ops (running first)
+   with step chips + streaming terminal + cancel, and the completed-ops
+   history strip above them.
+   --------------------------------------------------------------------------- */
+
+function OpsConsole({ clusterId }: { clusterId: ID }) {
+  const ops = useLive(useShallow(selectClusterOps(clusterId)));
+  const now = useNow(1000);
+  const [openRows, setOpenRows] = useState<ReadonlySet<string>>(new Set());
+  const [cancelId, setCancelId] = useState<ID | null>(null);
+  const [logOp, setLogOp] = useState<{ id: ID | null; title: string }>({ id: null, title: 'op' });
+  const [refreshing, setRefreshing] = useState(false);
+
+  /* running/queued first, then the rest chronologically */
+  const active = useMemo(() => ops.filter((o) => isOpActive(o)), [ops]);
+  const done = useMemo(() => ops.filter((o) => !isOpActive(o)).slice(0, 24), [ops]);
+
+  /* open the newest live op on first arrival so the stream is visible */
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    const top = active[0];
+    if (autoOpenedRef.current || top === undefined) return;
+    autoOpenedRef.current = true;
+    setOpenRows((prev) => (prev.size === 0 ? new Set([top.id]) : prev));
+  }, [active]);
+
+  const refresh = (): void => {
+    setRefreshing(true);
+    void api
+      .ops({ limit: 80, clusterId })
+      .then((list) => {
+        mergeOpsIntoStore(list);
+      })
+      .catch((e: unknown) => {
+        toast.error('op list refresh failed', e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setRefreshing(false));
+  };
+
+  const cancelOpNow = (): void => {
+    const id = cancelId;
+    if (id === null) return;
+    setCancelId(null);
+    void cancelOp(id)
+      .then((r) => {
+        if (r.ok) toast.ok('Cancel requested', `op ${id} — best-effort; the remote step runs to timeout`);
+        else toast.warn('Cancel not accepted — op already finished');
+      })
+      .catch((e: unknown) => {
+        toast.error('Cancel failed', e instanceof Error ? e.message : String(e));
+      });
+  };
+
+  const toggleRow = (opId: ID): void =>
+    setOpenRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(opId)) next.delete(opId);
+      else next.add(opId);
+      return next;
+    });
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-[var(--sd-card-gap)]">
+      <Panel
+        title="Live ops"
+        sub={active.length > 0 ? `${active.length} running/queued — newest first, streaming` : 'nothing running'}
+        actions={
+          <Btn size="sm" variant="ghost" onClick={refresh} loading={refreshing} title="GET /api/ops?cluster_id=">
+            <RefreshCw size={12} />
+            Refresh
+          </Btn>
+        }
+      >
+        <div className="flex max-h-[560px] min-h-0 flex-col gap-1 overflow-y-auto px-2 pb-2">
+          {active.map((op) => (
+            <OpRow
+              key={op.id}
+              op={op}
+              now={now}
+              expanded={openRows.has(op.id)}
+              onToggle={() => toggleRow(op.id)}
+              onCancel={() => setCancelId(op.id)}
+            />
+          ))}
+          {active.length === 0 && (
+            <Empty
+              title="No live operations."
+              hint="Start / stop / preflight / check / verify land here the moment they are submitted."
+              className="py-8"
+            />
+          )}
+        </div>
+      </Panel>
+
+      <Panel title="Completed ops" sub="latest 24 — open one for the full log" className="shrink-0">
+        <div className="flex flex-wrap gap-1.5 px-4 pb-4">
+          {done.map((op) => (
+            <button
+              key={op.id}
+              type="button"
+              onClick={() => setLogOp({ id: op.id, title: op.kind })}
+              className="cursor-pointer outline-none hover:brightness-125"
+              title={`${op.kind} — ${op.message !== null && op.message !== undefined && op.message !== '' ? op.message : 'click for the full log'}`}
+            >
+              <Chip variant={opStateVariant(op.state)} className="font-mono">
+                {op.state === 'ok' ? '✓' : op.state === 'error' ? '✗' : '·'} {op.kind} · {opDurationLabel(op, now)}
+              </Chip>
+            </button>
+          ))}
+          {done.length === 0 && (
+            <span className="text-2xs text-low">no completed ops in the buffer yet — history fills from the 30 s audit pull</span>
+          )}
+        </div>
+      </Panel>
+
+      <OpLogDialog opId={logOp.id} title={logOp.title} onClose={() => setLogOp({ id: null, title: 'op' })} />
+
+      <ConfirmDialog
+        open={cancelId !== null}
+        onClose={() => setCancelId(null)}
+        onConfirm={cancelOpNow}
+        title="Cancel operation?"
+        summary={
+          <>
+            Best-effort cancel of <span className="font-mono text-hi">{cancelId ?? ''}</span>. The SSH exec backing the
+            current step runs until its own timeout, so a teardown may still complete after the cancel.
+          </>
+        }
+        confirmLabel="Cancel op"
+      />
+    </div>
+  );
 }
 
 /* ---------------------------------------------------------------------------

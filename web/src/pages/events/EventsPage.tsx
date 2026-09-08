@@ -112,7 +112,7 @@ export default function EventsPage() {
     return out.slice(0, RENDER_CAP);
   }, [records, levels, clusterSel, kind, unackedOnly]);
 
-  const unackedShown = useMemo(() => visible.filter((e) => !e.acked).slice(0, 300), [visible]);
+  const unackedShown = useMemo(() => visible.filter((e) => !e.acked), [visible]);
   const unackedTotal = useMemo(() => {
     let n = 0;
     for (const e of records.values()) if (!e.acked) n++;
@@ -157,10 +157,14 @@ export default function EventsPage() {
   const ackAllShown = useCallback((): void => {
     const ids = unackedShown.map((e) => e.id);
     if (ids.length === 0) return;
-    void ackEvents(ids)
-      .then((r) => {
+    // server caps one ack call at 500 ids — chunk so "all shown" really is all
+    const batches: string[][] = [];
+    for (let i = 0; i < ids.length; i += 450) batches.push(ids.slice(i, i + 450));
+    void Promise.all(batches.map((b) => ackEvents(b)))
+      .then((rs) => {
         markAcked(ids);
-        toast.ok(`Acked ${r.count ?? ids.length} shown event${ids.length === 1 ? '' : 's'}`);
+        const n = rs.reduce((acc, r) => acc + (r.count ?? 0), 0);
+        toast.ok(`Acked ${Math.max(n, ids.length)} shown event${ids.length === 1 ? '' : 's'}`);
       })
       .catch((e: unknown) => {
         toast.error('Ack failed', e instanceof Error ? e.message : String(e));

@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { KeyRound, X } from 'lucide-react';
+import { useEscapeClaim } from '../ds/Modal';
 import { cn } from './cn';
 import { ApiClientError, api, setAuthToken, useWs, isApiClientError } from '../api/client';
 import type { OpRecord } from '../api/types';
@@ -325,17 +326,7 @@ export function Drawer({
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [open, busy, onClose]);
+  useEscapeClaim(open, busy, onClose);
 
   if (!open) return null;
 

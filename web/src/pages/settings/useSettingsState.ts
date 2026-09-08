@@ -1,6 +1,6 @@
 /* settings gate — one query + a patch wrapper that toasts + feeds the 401 gate. */
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useQuery } from '../../api/queries';
 import {
   fetchSettings,
@@ -61,4 +61,21 @@ export function saveQuietly(
     .catch(() => {
       /* already toasted by the gate */
     });
+}
+
+/**
+ * Section draft gate: apply a server refresh ONLY while the local draft is
+ * clean. Any other section's save() triggers a gate reload; without this,
+ * a dirty draft in an untouched section would be silently overwritten
+ * (review finding #8). Call `dirtyRef.current = <computed>` AFTER the hook
+ * (updated per render); the gate never honors refreshes while it is true.
+ */
+export function useDraftGate<T>(fresh: T | null, dirtyRef: { current: boolean }, apply: (t: T) => void): void {
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  useEffect(() => {
+    if (fresh === null) return;
+    if (dirtyRef.current) return;
+    applyRef.current(fresh);
+  }, [fresh, dirtyRef]);
 }

@@ -116,8 +116,8 @@ export interface ArgvMirrorInput {
     max_tokens: number;
     duration: number;
     coding_peak: boolean;
-    coding_peak_runs?: number;
-    coding_peak_max_tokens?: number;
+    coding_peak_runs?: number | null;
+    coding_peak_max_tokens?: number | null;
     extra?: string;
   };
 }
@@ -146,8 +146,8 @@ export function mirrorArgv(input: ArgvMirrorInput): string[] {
   }
   if (input.args.coding_peak) {
     argv.push('--coding-peak');
-    if (input.args.coding_peak_runs !== undefined) argv.push('--coding-peak-runs', String(input.args.coding_peak_runs));
-    if (input.args.coding_peak_max_tokens !== undefined) {
+    if (input.args.coding_peak_runs != null) argv.push('--coding-peak-runs', String(input.args.coding_peak_runs));
+    if (input.args.coding_peak_max_tokens != null) {
       argv.push('--coding-peak-max-tokens', String(input.args.coding_peak_max_tokens));
     }
   }

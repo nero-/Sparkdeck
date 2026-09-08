@@ -53,28 +53,52 @@ function parseFramePayload(payload: string): StreamFrame | null {
     stats?: unknown;
     __error?: unknown;
     error?: unknown;
+    /* the live backend emits the stats body directly (docs drift — the
+       pinned contract wraps it in {"stats": …}); both shapes accepted */
+    ttft_ms?: unknown;
+    tps?: unknown;
+    output_tokens?: unknown;
+    prompt_tokens?: unknown;
+    total_ms?: unknown;
   };
 
   if (obj.__error !== undefined && obj.__error !== null) {
     const e = obj.__error;
-    const message = typeof e === 'string' ? e : typeof e === 'object' && e !== null && typeof (e as { message?: unknown }).message === 'string' ? (e as { message: string }).message : JSON.stringify(e);
+    const message =
+      typeof e === 'string'
+        ? e
+        : typeof e === 'object' && e !== null && typeof (e as { message?: unknown }).message === 'string'
+          ? (e as { message: string }).message
+          : JSON.stringify(e);
     return { kind: 'error', message };
   }
-  if (obj.stats !== undefined && obj.stats !== null && typeof obj.stats === 'object') {
-    const s = obj.stats as Record<string, unknown>;
-    const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+
+  const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+
+  /* accept BOTH the pinned `{"stats": …}` wrapper and the live backend's
+     bare stats body (`{"ttft_ms":…,"tps":…}`) — docs drift, see task report */
+  const hasStatsShape = (o: unknown): boolean =>
+    typeof o === 'object' && o !== null &&
+    (typeof (o as Record<string, unknown>).ttft_ms === 'number' ||
+      typeof (o as Record<string, unknown>).tps === 'number' ||
+      typeof (o as Record<string, unknown>).output_tokens === 'number');
+
+  const statsBody: unknown = hasStatsShape(obj) ? obj : typeof obj.stats === 'object' && hasStatsShape(obj.stats) ? obj.stats : null;
+  if (statsBody !== null) {
+    const st = statsBody as Record<string, unknown>;
     return {
       kind: 'stats',
       stats: {
-        ttft_ms: num(s.ttft_ms) ?? 0,
-        tps: num(s.tps) ?? 0,
-        output_tokens: typeof s.output_tokens === 'number' ? s.output_tokens : 0,
-        prompt_tokens: num(s.prompt_tokens),
-        total_ms: num(s.total_ms) ?? 0,
+        ttft_ms: num(st.ttft_ms) ?? 0,
+        tps: num(st.tps) ?? 0,
+        output_tokens: typeof st.output_tokens === 'number' ? st.output_tokens : 0,
+        prompt_tokens: num(st.prompt_tokens),
+        total_ms: num(st.total_ms) ?? 0,
       },
     };
   }
-  const text = obj.delta && typeof obj.delta.content === 'string' ? obj.delta.content : null;
+
+  const text = obj.delta !== null && obj.delta !== undefined && typeof obj.delta.content === 'string' ? obj.delta.content : null;
   if (text !== null) return { kind: 'delta', text };
   return null;
 }
@@ -166,6 +190,7 @@ export async function streamChat(opts: ChatStreamOptions): Promise<void> {
       const chunk = await reader.read();
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n'); // CRLF-normalize (proxy-safe)
       // SSE frames are separated by a blank line ("data: …\n\n")
       let idx = buffer.indexOf('\n\n');
       while (idx !== -1) {

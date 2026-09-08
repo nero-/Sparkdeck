@@ -674,7 +674,8 @@ function FleetStrip({
         </div>
         <span className="ml-auto font-mono text-2xs text-low" title="Data source note">
           <span className={wsStatus === 'online' ? 'text-accent' : undefined}>{wsStatus === 'online' ? 'live' : wsStatus}</span>
-          {' · '}~{samplingS}s per node · avg across {sources} node{sources === 1 ? '' : 's'} · x-axis: live tail ({FLEET_CAP} pts)
+          {' · '}~{samplingS}s per node ·{' '}
+          {sources === 0 ? 'warming up' : `avg across ${sources} node${sources === 1 ? '' : 's'}`} · x-axis: live tail ({FLEET_CAP} pts)
         </span>
       </div>
     </Panel>

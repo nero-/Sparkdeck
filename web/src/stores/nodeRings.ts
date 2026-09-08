@@ -73,6 +73,21 @@ const useRingVersion = create<RingState>()(() => ({ version: 0 }));
 
 let wired = false;
 
+const RING_EVICT_TICKS = 90; // ~3 min at 2s cadence: keys idle this long die
+const lastSeenTick = new Map<string, number>();
+let evictTick = 0;
+
+function evictStaleRings(): void {
+  evictTick += 1;
+  for (const key of rings.keys()) {
+    if (evictTick - (lastSeenTick.get(key) ?? 0) > RING_EVICT_TICKS) {
+      rings.delete(key);
+      seqs.delete(key);
+      lastSeenTick.delete(key);
+    }
+  }
+}
+
 /** Attach the one-time WS-fed appender. Cheap; safe to call from every hook. */
 function wire(): void {
   if (wired) return;
@@ -95,9 +110,11 @@ function wire(): void {
       const series = frame.series ?? {};
       for (const [seriesId, v] of Object.entries(series)) {
         append(frame.node_id, seriesId, frame.ts, typeof v === 'number' ? v : null);
+        lastSeenTick.set(ringKey(frame.node_id, seriesId), evictTick);
       }
     }
     if (touched) useRingVersion.setState((st) => ({ version: st.version + 1 }));
+    evictStaleRings();
   });
 }
 

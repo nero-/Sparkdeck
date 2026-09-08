@@ -3,11 +3,42 @@
    typed action summary, remote commands in a code block, explicit Run.
    ========================================================================= */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { Btn, Input } from './primitives';
+
+
+/* Nested-overlay Escape discipline: only the TOPMOST open overlay consumes
+   Escape (module-level claim stack — the last mounted overlay owns the key). */
+const escapeStack: symbol[] = [];
+
+export function useEscapeClaim(open: boolean, busy: boolean, onClose: () => void): void {
+  const cbRef = useRef(onClose);
+  cbRef.current = onClose;
+  const sym = useMemo(() => Symbol('esc'), []);
+  useEffect(() => {
+    if (!open) return;
+    escapeStack.push(sym);
+    let alive = true;
+    const onKey = (e: KeyboardEvent): void => {
+      if (!alive) return;
+      if (e.key !== 'Escape') return;
+      if (escapeStack[escapeStack.length - 1] !== sym) return; // newer overlay is on top
+      if (busy) return;
+      e.preventDefault();
+      cbRef.current();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      alive = false;
+      window.removeEventListener('keydown', onKey, true);
+      const i = escapeStack.lastIndexOf(sym);
+      if (i !== -1) escapeStack.splice(i, 1);
+    };
+  }, [open, busy, sym]);
+}
 
 export function Modal({
   open,
@@ -39,17 +70,7 @@ export function Modal({
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [open, busy, onClose]);
+  useEscapeClaim(open, busy, onClose);
 
   if (!open) return null;
 

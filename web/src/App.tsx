@@ -2,7 +2,7 @@
    App shell — rail + top bar + routed content (see src/router.tsx for routes).
    ========================================================================= */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Toaster } from './ds/Toast';
 import { Rail } from './shell/Rail';
@@ -23,17 +23,22 @@ export default function App() {
 
   // theme + density ride document attributes (token swap, no re-render needed
   // beyond this state change driving the attr)
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia('(prefers-color-scheme: dark)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e: MediaQueryListEvent): void => setSystemDark(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
   useEffect(() => {
     const root = document.documentElement;
     const resolvedTheme =
-      theme === 'system'
-        ? window.matchMedia('(prefers-color-scheme: dark)').matches
-          ? 'dark'
-          : 'light'
-        : theme;
+      theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
     root.dataset.theme = resolvedTheme;
     root.dataset.density = density;
-  }, [theme, density]);
+  }, [theme, density, systemDark]);
 
   useNavHotkeys();
 

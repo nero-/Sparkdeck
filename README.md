@@ -24,7 +24,7 @@ $ make doctor         # read-only probe of the configured nodes
 | **Bench** | One-click runs of the operator's own `llm-inference-bench` tool (`bench/llm_decode_bench.py`) with presets from OPS-GUIDE, checkpoint-based live per-cell progress, parsed summary grids (aggregate tok/s matrix, prefill table, spec-accept, coding-peak), history across runs (stored + repo artifacts), run reports written as `run-NN-*.md`. |
 | **Images / engine** | docker image inventory (filtered), SERVING_IMAGE cross-check per profile/env-file, copy image between pair nodes over the CX7 (docker save‖load), trigger detached image builds on the builder host with streamed logs, switch a profile's SERVING_IMAGE (with preview + confirmation). |
 | **Logs** | Follow serving container logs (`docker logs -f`) with ANSI rendering, filters, download. |
-| **Events/alerts** | Memory-envelope thresholds (118.5/120.5 GiB default per RECIPE health rules), thermal thresholds, thermal-throttle flags, swap usage, node/SSH health transitions, op outcomes — dedup'd, ack-able, optional webhook. |
+| **Events/alerts** | Memory-envelope thresholds (121.0/121.4 GiB defaults — ~119-120 GiB is normal serving; >121.4 OOM risk), thermal thresholds, thermal-throttle flags, swap usage, node/SSH health transitions, op outcomes — dedup'd, ack-able, optional webhook. |
 | **Settings** | Multi-cluster topology editor with the key feature: **per-node ordered address lists** (LAN / direct CX7 fabric / Tailscale / custom) with address failover + reachability tests; per-node ssh alias/user/port; profiles; bench paths; retention; alert thresholds. Export/import the whole config as JSON. |
 
 Out of scope (by design): the qwen38next project, 4-node disaggregated

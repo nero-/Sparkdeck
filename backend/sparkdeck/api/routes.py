@@ -283,10 +283,17 @@ def attach(app, a) -> None:
         all_flag = body.get("all")
         if all_flag:
             await a.db.execute("UPDATE events SET acked=1 WHERE acked=0")
-            return {"ok": True}
-        for i in ids or []:
-            await a.db.execute("UPDATE events SET acked=1 WHERE id=?", (i,))
-        return {"ok": True, "count": len(ids or [])}
+            ids_acked: object = "all"
+            rows = await a.db.fetch_all("SELECT COUNT(*) AS n FROM events WHERE acked=1")
+            count = int(rows[0]["n"]) if rows else 0
+        else:
+            for i in ids or []:
+                await a.db.execute("UPDATE events SET acked=1 WHERE id=?", (i,))
+            ids_acked = list(ids or [])
+            count = len(ids_acked)
+        # cross-tab sync: every subscriber to `events` learns the ack state
+        await a.hub.publish("events", {"__ack": ids_acked})
+        return {"ok": True, "count": count}
 
     # ---------------- cluster control actions ----------------
     @r.post("/clusters/{cluster_id}/actions/start")

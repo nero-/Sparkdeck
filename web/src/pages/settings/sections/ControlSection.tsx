@@ -2,12 +2,13 @@
    health timeout + head and worker mapping. These strings run VERBATIM on the
    nodes via pairctl — the warning chip is the point of this section. */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { TriangleAlert } from 'lucide-react';
 import type { ClusterControl, ClusterTopology } from '../../../api/types';
 import { fetchClusters, patchCluster } from '../../../api/admin';
 import { useQuery } from '../../../api/queries';
-import { Btn, Chip, Input, Select, Spinner, toast } from '../../../ds';
+import { useDraftGate } from '../useSettingsState';
+import { Chip, Input, Select, Spinner, toast } from '../../../ds';
 import { cn } from '../../../lib/cn';
 import { DirtySave, FieldMsg, NumField, offerAuthGate, errCopy } from '../../../lib/pagekit';
 import { SectionWrap } from '../SectionWrap';
@@ -68,9 +69,8 @@ function ControlForm({ cluster }: { cluster: ClusterTopology }) {
   const [error, setError] = useState<unknown>(null);
   const workers = useMemo(() => cluster.nodes.filter((n) => n.id !== d.head_node_id), [cluster.nodes, d.head_node_id]);
 
-  useEffect(() => {
-    setD({ ...cluster.control });
-  }, [cluster.id, cluster.control]);
+  const dirtyRef = useRef(false);
+  useDraftGate(cluster.control, dirtyRef, (cc) => setD({ ...cc }));
 
   const patch = (p: Partial<ClusterControl>): void => setD((cur) => ({ ...cur, ...p }));
 
@@ -86,6 +86,7 @@ function ControlForm({ cluster }: { cluster: ClusterTopology }) {
       d.worker_node_id !== cluster.control.worker_node_id,
     [d, cluster.control],
   );
+  dirtyRef.current = dirty;
   const valid = d.serve_dir.trim() !== '' && d.launcher.trim() !== '' && portNumOk(d.health_timeout_s);
 
   const save = async (): Promise<void> => {

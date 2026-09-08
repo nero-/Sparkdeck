@@ -261,6 +261,34 @@ export const WS_TOPICS = [
 ] as const satisfies readonly WsTopic[];
 
 const EVENTS_RING_MAX = 500;
+const OPS_KEEP = 200;
+const BENCH_KEEP = 60;
+
+function capOps(m: Map<string, OpRecord>, cap: number): void {
+  if (m.size <= cap) return;
+  const keep: OpRecord[] = [];
+  const rest: OpRecord[] = [];
+  for (const op of m.values()) {
+    if (op.state === 'queued' || op.state === 'running') keep.push(op);
+    else rest.push(op);
+  }
+  rest.sort((a, b) => b.created - a.created);
+  m.clear();
+  for (const op of [...rest.slice(0, Math.max(0, cap - keep.length)), ...keep]) m.set(op.id, op);
+}
+
+function capBench(m: Map<string, BenchJob>, cap: number): void {
+  if (m.size <= cap) return;
+  const keep: BenchJob[] = [];
+  const rest: BenchJob[] = [];
+  for (const j of m.values()) {
+    if (j.state === 'queued' || j.state === 'running') keep.push(j);
+    else rest.push(j);
+  }
+  rest.sort((a, b) => b.created - a.created);
+  m.clear();
+  for (const j of [...rest.slice(0, Math.max(0, cap - keep.length)), ...keep]) m.set(j.id, j);
+}
 const LOG_TAIL_MAX_LINES = 4000;
 const LOG_TAIL_MAX_KEYS = 64;
 const RECONNECT_MAX_MS = 15_000;
@@ -339,9 +367,15 @@ function handleWsMessage(raw: string): void {
 
   switch (topic as WsTopic) {
     case 'nodes': {
-      if (!Array.isArray(data)) return;
+      // hub publishes one snapshot object per emit; tolerate arrays too
+      const arr: LiveNodeState[] = Array.isArray(data)
+        ? (data as LiveNodeState[])
+        : data && typeof data === 'object' && typeof (data as LiveNodeState).node_id === 'string'
+          ? [data as LiveNodeState]
+          : [];
+      if (arr.length === 0) return;
       const next: Record<ID, LiveNodeState> = { ...store.liveNodes };
-      for (const item of data as LiveNodeState[]) {
+      for (const item of arr) {
         if (item && typeof item.node_id === 'string') next[item.node_id] = item;
       }
       useWs.setState({ liveNodes: next });
@@ -364,10 +398,20 @@ function handleWsMessage(raw: string): void {
       if (!op || typeof op.id !== 'string') return;
       const next = new Map(store.opsById);
       next.set(op.id, op);
+      capOps(next, OPS_KEEP);
       useWs.setState({ opsById: next });
       break;
     }
     case 'events': {
+      const ackPayload = (data as { __ack?: string[] | 'all' } | null)?.__ack;
+      if (ackPayload) {
+        // backend ack broadcast (single- or multi-tab sync)
+        const ring = store.eventsRing.map((e) =>
+          ackPayload === 'all' || ackPayload.includes(e.id) ? { ...e, acked: true } : e,
+        );
+        useWs.setState({ eventsRing: ring });
+        break;
+      }
       const ev = data as EventRec | null;
       if (!ev || typeof ev.id !== 'string') return;
       const ring = store.eventsRing.filter((e) => e.id !== ev.id);
@@ -381,6 +425,7 @@ function handleWsMessage(raw: string): void {
       if (!job || typeof job.id !== 'string') return;
       const benchById = new Map(store.benchById);
       benchById.set(job.id, job);
+      capBench(benchById, BENCH_KEEP);
       let logTails = store.logTails;
       if (typeof payload?.tail === 'string') {
         logTails = new Map(store.logTails);

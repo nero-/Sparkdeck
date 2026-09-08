@@ -379,7 +379,7 @@ function NodeDashboard({
   const alertsv = alerts ?? ALERT_DEFAULTS;
 
   const [window, setWindow] = useState<HistWindow>('5m');
-  const age = useSampleAge(live);
+  const age = useSampleAge(live?.last_sample_ts ?? sample?.ts ?? null);
 
   const tiles = useMemo(
     () => withMemHorizons(buildLayout(sample, isHead), alertsv),
@@ -400,7 +400,12 @@ function NodeDashboard({
 
   const liveOn = windowIsLive(window);
 
-  const [hiddenByTile, setHiddenByTile] = useState<Record<string, ReadonlySet<string>>>({});
+  /* default picks: mem tile shows used vs the warn horizon (avail/pagecache
+     hug zero and the crit line sits 2 GiB from warn — both are one click away
+     in the series picker); keeps the default view = "headroom question" */
+  const [hiddenByTile, setHiddenByTile] = useState<Record<string, ReadonlySet<string>>>(() => ({
+    mem: new Set<string>(['mem.avail_gib', 'mem.pagecache_gib', 'hz.crit']),
+  }));
   const setHidden = (tileId: string, next: ReadonlySet<string> | null): void => {
     setHiddenByTile((prev) => {
       if (next === null) {
@@ -790,14 +795,13 @@ function ChartTile({
    misc helpers
    --------------------------------------------------------------------------- */
 
-function useSampleAge(live: LiveNodeState | undefined): string {
+function useSampleAge(ts: number | null | undefined): string {
   const [, force] = useState(0);
   useEffect(() => {
-    if (live?.last_sample_ts === null || live?.last_sample_ts === undefined) return;
+    if (ts === null || ts === undefined) return;
     const t = setInterval(() => force((n) => n + 1), 1000);
     return () => clearInterval(t);
-  }, [live?.last_sample_ts]);
-  const ts = live?.last_sample_ts;
+  }, [ts]);
   if (ts === null || ts === undefined) return 'no live frame';
   const d = Math.max(0, Math.round((Date.now() - ts) / 1000));
   if (d < 60) return `${d}s ago`;

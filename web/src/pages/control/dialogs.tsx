@@ -10,7 +10,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Square } from 'lucide-react';
 import { cn } from '../../lib/cn';
-import { Btn, Chip, Empty, Modal, Spinner, Terminal, toast } from '../../ds';
+import { Btn, Chip, Empty, Input, KeyRow, Modal, Spinner, Terminal, Toggle, toast } from '../../ds';
 import { api } from '../../api/client';
 import { cancelOp, readGidTable } from '../../api/control';
 import { useLive } from '../../stores/live';
@@ -116,13 +116,22 @@ export function opDurationLabel(op: OpRecord | null | undefined, now: number): s
 }
 
 /* ---------------------------------------------------------------------------
-   StartDialog
+   StartDialog — stage 1 configures (profile / health timeout / extras),
+   stage 2 confirms with the exact remote commands + the operator warning
+   before POSTing. One modal, two stages — matches DESIGN.md "Confirmations".
    --------------------------------------------------------------------------- */
 
-const TIMEOUT_PRESETS = [720, 1900] as const;
+interface TimeoutPreset {
+  s: number;
+  note: string;
+}
+const TIMEOUT_PRESETS: readonly TimeoutPreset[] = [
+  { s: 720, note: 'steady-state reload — the usual warm start' },
+  { s: 1900, note: 'cold JIT first boot on a new image' },
+];
 const TIMEOUT_MIN = 180;
 const TIMEOUT_MAX = 3600;
-const TIMEOUT_STEP = 10;
+const TIMEOUT_DEFAULT = 720;
 
 function envFileOf(node: NodeConfig | undefined, profileKey: string): string {
   return `rank-${node?.env_rank ?? 0}-${profileKey}.env`;
@@ -136,8 +145,8 @@ function startCommands(cluster: ClusterTopology, profileKey: string, extra: stri
   const cmdFor = (n: NodeConfig | undefined): string =>
     `cd ${ctl.serve_dir} && bash ${ctl.launcher} --run ${envFileOf(n, profileKey)}${extraPart !== '' ? ` ${extraPart}` : ''} 2>&1`;
   const cmds: string[] = [];
-  if (worker !== undefined) cmds.push(`# worker ${worker.name}\n${cmdFor(worker)}`);
-  if (head !== undefined) cmds.push(`# head ${head.name}\n${cmdFor(head)}`);
+  if (worker !== undefined) cmds.push(`# worker ${worker.name}: ${envFileOf(worker, profileKey)}\n${cmdFor(worker)}`);
+  if (head !== undefined) cmds.push(`# head ${head.name}: ${envFileOf(head, profileKey)}\n${cmdFor(head)}`);
   return cmds;
 }
 
@@ -153,7 +162,7 @@ export function StartDialog({
   serviceProfileKey: string | null;
   open: boolean;
   onClose: () => void;
-  /** POSTs the action; resolves once accepted (caller toasts), rejects on error */
+  /** POSTs the action; resolves once accepted (caller toasts + routes), rejects on error */
   onSubmit: (v: {
     profile_key: string;
     health_timeout_s: number;
@@ -165,131 +174,194 @@ export function StartDialog({
   const defaultKey =
     serviceProfileKey ??
     (profiles.find((p) => p.key === 'mtp3-spark')?.key ?? profiles[0]?.key ?? 'mtp3-spark');
+  const [stage, setStage] = useState<'config' | 'confirm'>('config');
   const [selected, setSelected] = useState(defaultKey);
-  const [timeoutS, setTimeoutS] = useState(cluster.control.health_timeout_s ?? 720);
+  const [timeoutText, setTimeoutText] = useState(
+    String(cluster.control.health_timeout_s ?? TIMEOUT_DEFAULT),
+  );
   const [extra, setExtra] = useState(cluster.control.start_extra ?? '');
   const [skipPreflight, setSkipPreflight] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  // re-sync the pre-select each time the dialog opens
+  const clampTimeout = (v: number): number =>
+    Math.min(TIMEOUT_MAX, Math.max(TIMEOUT_MIN, Math.round(Number.isFinite(v) ? v : TIMEOUT_DEFAULT)));
+  const parsedTimeout = clampTimeout(Number.parseInt(timeoutText, 10)); // NaN-safe: clamps to default
+  const timeoutSInvalid = !Number.isFinite(Number.parseInt(timeoutText, 10));
+
+  // re-sync the pre-select each time the dialog opens (fresh stage every time)
   useEffect(() => {
-    if (open) setSelected(defaultKey);
-  }, [open, defaultKey]);
+    if (open) {
+      setSelected(defaultKey);
+      setStage('config');
+      setTimeoutText(String(cluster.control.health_timeout_s ?? TIMEOUT_DEFAULT));
+      setExtra(cluster.control.start_extra ?? '');
+      setSkipPreflight(false);
+    }
+  }, [open, defaultKey, cluster.control.start_extra]);
 
   const cmds = useMemo(() => startCommands(cluster, selected, extra), [cluster, selected, extra]);
+  const chosenProfile = profiles.find((p) => p.key === selected) ?? null;
 
   const submit = (): void => {
     setBusy(true);
-    onSubmit({ profile_key: selected, health_timeout_s: timeoutS, skip_preflight: skipPreflight, extra })
+    onSubmit({ profile_key: selected, health_timeout_s: parsedTimeout, skip_preflight: skipPreflight, extra })
       .then(onClose)
       .catch(() => undefined)
       .finally(() => setBusy(false));
   };
+
+  const configBody = (
+    <>
+      {/* profile pick — radio cards */}
+      <div role="radiogroup" aria-label="Serving profile" className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+        {profiles.map((p) => (
+          <ProfileRadio key={p.key} profile={p} active={p.key === selected} onPick={() => setSelected(p.key)} />
+        ))}
+        {profiles.length === 0 && (
+          <div className="col-span-full py-4 text-center text-xs text-low">No profiles configured on this cluster.</div>
+        )}
+      </div>
+
+      {/* health timeout — presets + custom */}
+      <div className="flex flex-col gap-2">
+        <span className="sd-monolabel">health timeout override</span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(cluster.control.health_timeout_s !== TIMEOUT_PRESETS[0]?.s && cluster.control.health_timeout_s != null
+            ? [{ s: cluster.control.health_timeout_s, note: 'cluster default' }, ...TIMEOUT_PRESETS]
+            : TIMEOUT_PRESETS
+          ).map((preset) => (
+            <Btn
+              key={preset.s}
+              size="sm"
+              variant={parsedTimeout === preset.s ? 'primary' : 'ghost'}
+              onClick={() => setTimeoutText(String(preset.s))}
+              title={`${preset.s} s — ${preset.note}`}
+              className="font-mono"
+            >
+              {preset.s} s
+            </Btn>
+          ))}
+          <Input
+            aria-label="custom health timeout seconds"
+            className="w-28"
+            inputMode="numeric"
+            value={timeoutText}
+            invalid={timeoutSInvalid}
+            onChange={(e) => setTimeoutText(e.currentTarget.value)}
+            onBlur={(e) => setTimeoutText(String(clampTimeout(Number.parseInt(e.currentTarget.value, 10))))}
+          />
+          <span className="text-2xs text-low" title={TIMEOUT_PRESETS.find((p) => p.s === parsedTimeout)?.note}>
+            s — {TIMEOUT_PRESETS.find((p) => p.s === parsedTimeout)?.note ?? `custom (${TIMEOUT_MIN}–${TIMEOUT_MAX})`}
+          </span>
+        </div>
+      </div>
+
+      {/* extra flags passthrough */}
+      <label className="flex flex-col gap-1">
+        <span className="sd-monolabel">extra flags (pairctl EXTRA passthrough)</span>
+        <textarea
+          aria-label="extra flags"
+          rows={2}
+          className="sd-raised px-2.5 py-1.5 font-mono text-xs text-hi placeholder:text-low outline-none transition-colors duration-fast focus:border-accent/60"
+          value={extra}
+          onChange={(e) => setExtra(e.currentTarget.value)}
+          spellCheck={false}
+          placeholder="— (pairctl EXTRA)"
+        />
+        <span className="text-2xs text-low">prefilled from the cluster&apos;s start_extra; passed verbatim to launcher --run.</span>
+      </label>
+
+      {/* skip preflight toggle */}
+      <Toggle
+        checked={skipPreflight}
+        onChange={setSkipPreflight}
+        label={
+          <span className="flex flex-col items-start">
+            <span className="text-xs text-hi">skip preflight</span>
+            <span className="text-2xs text-low">
+              skips swappiness trim + page-cache drop on both nodes; the RoCE GID re-check always runs.
+            </span>
+          </span>
+        }
+      />
+
+      {/* the switch narrative (operator ops conventions) */}
+      <div className="rounded-inner border border-warn/25 bg-warn/5 px-3 py-2 text-xs text-mid">
+        <span className="font-semibold text-warn">Model switch:</span> the pair goes down and back up.{" "}
+        <strong className="text-hi">OWUI / Hermes / DSH lose their model</strong> during the switch. Worker comes up
+        first, then head; health is polled node-locally on the head until the timeout fires.
+      </div>
+    </>
+  );
+
+  const confirmBody = (
+    <>
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-0.5 sm:grid-cols-2">
+        <KeyRow label="profile" value={<span className="font-mono text-2xs">{selected}</span>} />
+        <KeyRow label="health timeout" value={<span className="sd-num font-mono text-2xs">{parsedTimeout} s</span>} />
+        <KeyRow label="skip preflight" value={<span className="font-mono text-2xs">{skipPreflight ? 'yes' : 'no'}</span>} />
+        <KeyRow label="extra" value={<span className="min-w-0 truncate font-mono text-2xs">{extra.trim() === '' ? '—' : extra.trim()}</span>} />
+      </dl>
+
+      <div className="rounded-inner border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-mid">
+        <span className="font-semibold text-warn">The pair goes down / up —</span> OWUI, Hermes and DSH lose their
+        model during the switch. Serving is expected back in ~3–5 min; a cold-JIT boot on a fresh image can take
+        longer (that is what the 1900 s timeout reserves for). Current consumers stay without a model until the head
+        reports healthy.
+      </div>
+
+      {/* the exact remote commands, worker first */}
+      <div className="flex flex-col gap-1">
+        <span className="sd-monolabel">will run, in this order</span>
+        <pre className="sd-raised max-h-44 overflow-auto p-3 font-mono text-2xs leading-relaxed text-mid">
+          {cmds.map((c, i) => (
+            <div key={i} className="sd-num whitespace-pre-wrap">
+              <span className="mr-2 text-low select-none" aria-hidden>
+                $
+              </span>
+              {c}
+            </div>
+          ))}
+        </pre>
+      </div>
+      {chosenProfile !== null && chosenProfile.notes !== null && chosenProfile.notes !== '' && chosenProfile.notes !== undefined && (
+        <div className="text-2xs text-low" title="profile notes">
+          profile note: {chosenProfile.notes}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <Modal
       open={open}
       onClose={onClose}
       busy={busy}
-      width={660}
-      title="Start pair"
+      width={680}
+      title={stage === 'config' ? 'Start pair — configure' : 'Start pair — confirm'}
       actions={
-        <>
-          <Btn variant="ghost" onClick={onClose} disabled={busy}>
-            Cancel
-          </Btn>
-          <Btn variant="primary" onClick={submit} loading={busy}>
-            Start pair
-          </Btn>
-        </>
+        stage === 'config' ? (
+          <>
+            <Btn variant="ghost" onClick={onClose} disabled={busy}>
+              Cancel
+            </Btn>
+            <Btn variant="primary" onClick={() => setStage('confirm')} disabled={profiles.length === 0}>
+              Review commands…
+            </Btn>
+          </>
+        ) : (
+          <>
+            <Btn variant="ghost" onClick={() => setStage('config')} disabled={busy}>
+              Back
+            </Btn>
+            <Btn variant="primary" onClick={submit} loading={busy}>
+              Start pair
+            </Btn>
+          </>
+        )
       }
     >
-      <div className="flex flex-col gap-4">
-        {/* profile pick — radio cards */}
-        <div role="radiogroup" aria-label="Serving profile" className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-          {profiles.map((p) => (
-            <ProfileRadio key={p.key} profile={p} active={p.key === selected} onPick={() => setSelected(p.key)} />
-          ))}
-        </div>
-
-        {/* health timeout slider + presets */}
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="sd-monolabel">health timeout override</span>
-            <span className="sd-num font-mono text-xs text-hi">{timeoutS} s</span>
-          </div>
-          <input
-            type="range"
-            min={TIMEOUT_MIN}
-            max={TIMEOUT_MAX}
-            step={TIMEOUT_STEP}
-            value={timeoutS}
-            onChange={(e) => setTimeoutS(Number(e.currentTarget.value))}
-            className="w-full cursor-pointer"
-            style={{ accentColor: 'var(--sd-accent)' }}
-            aria-label="health timeout seconds"
-          />
-          <div className="flex flex-wrap items-center gap-1.5">
-            {TIMEOUT_PRESETS.map((p) => (
-              <Btn
-                key={p}
-                size="sm"
-                variant={timeoutS === p ? 'primary' : 'ghost'}
-                onClick={() => setTimeoutS(p)}
-                title={p === (cluster.control.health_timeout_s ?? 720) ? 'cluster default' : p === 1900 ? 'slow-load reserve' : p === 720 ? '720 s preset' : `${p} s preset`}
-              >
-                {p} s
-              </Btn>
-            ))}
-          </div>
-        </div>
-
-        {/* extra flags passthrough */}
-        <label className="flex flex-col gap-1">
-          <span className="sd-monolabel">extra flags (EXTRA passthrough)</span>
-          <input
-            className="sd-raised h-9 px-2.5 font-mono text-xs text-hi outline-none transition-colors duration-fast focus:border-accent/60"
-            value={extra}
-            onChange={(e) => setExtra(e.currentTarget.value)}
-            spellCheck={false}
-            placeholder="— (pairctl EXTRA)"
-          />
-          <span className="text-2xs text-low">prefilled from the cluster&apos;s start_extra.</span>
-        </label>
-
-        {/* skip preflight toggle */}
-        <label className="flex cursor-pointer items-start gap-2">
-          <input
-            type="checkbox"
-            checked={skipPreflight}
-            onChange={(e) => setSkipPreflight(e.currentTarget.checked)}
-            className="mt-0.5 cursor-pointer"
-            style={{ accentColor: 'var(--sd-accent)' }}
-          />
-          <span className="flex flex-col">
-            <span className="text-xs text-hi">skip preflight</span>
-            <span className="text-2xs text-low">
-              skips swappiness trim + page-cache drop on both nodes; the RoCE GID re-check always runs.
-            </span>
-          </span>
-        </label>
-
-        {/* switch narrative (the operator&apos;s ops conventions) */}
-        <div className="rounded-inner border border-warn/25 bg-warn/5 px-3 py-2 text-xs text-mid">
-          <span className="font-semibold text-warn">Model switch:</span> Start brings the pair UP — worker first, then
-          head; takes ~3–5 min. OWUI/Hermes/DSH lose their model during the switch. A currently-serving pair is torn
-          down first, GIDs are re-checked, and health is polled on the head&apos;s node-local API.
-        </div>
-
-        {/* the exact remote commands, worker first */}
-        <pre className="sd-raised max-h-40 overflow-auto p-3 font-mono text-2xs leading-relaxed text-mid">
-          {cmds.map((c, i) => (
-            <div key={i} className="sd-num whitespace-pre-wrap">
-              {c}
-            </div>
-          ))}
-        </pre>
-      </div>
+      <div className="flex flex-col gap-4">{stage === 'config' ? configBody : confirmBody}</div>
     </Modal>
   );
 }
@@ -303,6 +375,14 @@ function ProfileRadio({
   active: boolean;
   onPick: () => void;
 }) {
+  const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+  const facts: [string, string][] = [
+    ['kv', profile.kv_pin_gib != null ? `${profile.kv_pin_gib} GiB` : '—'],
+    ['ctx', profile.context !== null && profile.context !== undefined ? compact.format(profile.context) : '—'],
+    ['spec', profile.speculator ?? '—'],
+    ['quant', profile.quant ?? '—'],
+    ['img/vid', `${String(profile.mm_images ?? '—')}/${String(profile.mm_videos ?? '—')}`],
+  ];
   return (
     <button
       type="button"
@@ -312,22 +392,30 @@ function ProfileRadio({
       className={cn(
         'flex cursor-pointer flex-col gap-0.5 rounded-inner border px-2.5 py-2 text-left transition-colors duration-fast',
         active
-          ? 'border-accent/50 bg-accent/10'
+          ? 'border-accent/60 bg-accent/10'
           : 'border-stroke bg-transparent hover:border-stroke-strong hover:bg-bg2',
       )}
     >
       <span className="flex items-center gap-1.5">
         <span className={cn('h-2 w-2 rounded-full', active ? 'bg-accent' : 'bg-low')} aria-hidden />
-        <span className="font-mono text-xs text-hi">{profile.key}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-hi">{profile.key}</span>
       </span>
-      <span className="truncate text-2xs text-low">{profile.label}</span>
-      <span className="sd-num font-mono text-2xs text-low">
-        kv {profile.kv_pin_gib ?? '—'} GiB · ctx{' '}
-        {profile.context !== null && profile.context !== undefined
-          ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(profile.context)
-          : '—'}{' '}
-        · {profile.quant ?? '—'}
+      <span className="truncate text-2xs text-low" title={profile.label}>
+        {profile.label}
       </span>
+      <dl className="mt-0.5 grid grid-cols-2 gap-x-2 gap-y-0">
+        {facts.map(([k, v]) => (
+          <div key={k} className="flex min-w-0 items-baseline gap-1">
+            <dt className="sd-monolabel shrink-0">{k}</dt>
+            <dd className="sd-num min-w-0 truncate font-mono text-2xs text-hi">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {profile.notes !== null && profile.notes !== undefined && profile.notes !== '' && (
+        <span className="line-clamp-2 text-2xs text-low" title={profile.notes}>
+          {profile.notes}
+        </span>
+      )}
     </button>
   );
 }

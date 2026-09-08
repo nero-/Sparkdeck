@@ -34,7 +34,7 @@
    - POST /api/settings/import exists in backend (routes.py), missing from docs.
    ========================================================================= */
 
-import { api } from './client';
+import { api, apiBaseUrl, getAuthToken } from './client';
 import type {
   AppSettings,
   BenchArgs,
@@ -81,6 +81,19 @@ function asList(v: unknown): unknown[] {
 
 function asRecordList(v: unknown): Record<string, unknown>[] {
   return asList(v).filter(isRecord);
+}
+
+/** Bearer-auth blob GET — used for the settings-export download. */
+async function blobFetch(path: string): Promise<Blob> {
+  const base = apiBaseUrl().replace(/\/+$/, '');
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${base}${path}`, { headers, credentials: 'omit' });
+  if (!res.ok) {
+    throw new Error(`GET ${path} → HTTP ${res.status}`);
+  }
+  return await res.blob();
 }
 
 /** True when an ApiClientError says "route not implemented / wrong method". */
@@ -138,7 +151,22 @@ export interface SettingsExport {
   settings: AppSettings | null;
 }
 
-/** GET /api/settings/export → `{topology, settings}`. */
+/**
+ * The pinned contract flattens bench defaults as `BenchArgs & {label?}` while
+ * the backend stores/echoes `{label, args}` (models.py BenchDefaults) — the
+ * export payload carries the nested shape. Normalize either here.
+ */
+export function benchDefaultsOf(raw: AppSettings['bench']['defaults']): { label: string; args: BenchArgs } | null {
+  if (raw === null || raw === undefined) return null;
+  const r = raw as unknown as Record<string, unknown>;
+  const argsRaw = isRecord(r.args) ? r.args : r; // nested {label, args} | flat
+  return {
+    label: asString(r.label) ?? 'adhoc',
+    args: normalizeBenchArgs(isRecord(argsRaw) ? argsRaw : {}),
+  };
+}
+
+/** GET /api/settings/export → `{topology, settings}` (parsed). */
 export async function fetchSettingsExport(): Promise<SettingsExport> {
   const raw = await api.get<unknown>('/api/settings/export');
   const r = isRecord(raw) ? raw : {};
@@ -151,6 +179,11 @@ export async function fetchSettingsExport(): Promise<SettingsExport> {
         ? (rawSettings as unknown as AppSettings)
         : null,
   };
+}
+
+/** Same endpoint as a download blob (client-resolved base + bearer header). */
+export async function downloadSettingsExport(): Promise<Blob> {
+  return blobFetch('/api/settings/export');
 }
 
 /**

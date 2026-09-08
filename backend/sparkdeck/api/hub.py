@@ -20,6 +20,7 @@ class Hub:
         self._clients: dict[Any, set[str]] = {}
         self._lock = asyncio.Lock()
         self._last_bench: dict[str, float] = {}
+        self._bench_tail_pending: dict[str, list] = {}
         self._last_sample: dict[str, float] = {}
         self.kv_tokens: dict[str, int] = {}          # "cluster:profile" -> tokens
         self._last_ops_state: dict[str, bool] = {}   # op id -> state changed; coalesce
@@ -84,15 +85,25 @@ class Hub:
 
     async def publish_bench_progress(self, job: BenchJob, tail_line: str | None = None) -> None:
         nowq = time.time()
+        # queue tails during the throttle window instead of dropping them, so
+        # the ws-fed console never shows gapped output; job frames always go
+        # through (state changes must never be held back)
+        pending = self._bench_tail_pending.setdefault(job.id, [])
         if tail_line is not None:
-            if nowq - self._last_bench.get(job.id, 0) < _THROTTLE_S:
-                payload = {"job": job.model_dump(), "tail": None}
-            else:
-                self._last_bench[job.id] = nowq
-                payload = {"job": job.model_dump(), "tail": tail_line}
-        else:
-            payload = {"job": job.model_dump(), "tail": None}
-        await self.publish("bench", payload)
+            pending.append(tail_line)
+            if len(pending) > 200:  # hard cap (flooding job) — keep newest
+                del pending[:-100]
+        throttle_ok = nowq - self._last_bench.get(job.id, 0) >= _THROTTLE_S
+        emit_tail: str | None = None
+        if pending and throttle_ok:
+            self._last_bench[job.id] = nowq
+            emit_tail = "\n".join(pending)
+            pending.clear()
+        elif tail_line is not None and self._last_bench.get(job.id, 0) == 0:
+            self._last_bench[job.id] = nowq
+            emit_tail = "\n".join(pending) or None
+            pending.clear()
+        await self.publish("bench", {"job": job.model_dump(), "tail": emit_tail})
 
     async def publish_event(self, ev: EventRec) -> None:
         await self.publish("events", ev.model_dump())
