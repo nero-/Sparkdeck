@@ -471,6 +471,12 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
   const workerName = workerNodeOf(cluster)?.name ?? 'worker';
   const stopCommands = useMemo(() => {
     const ctl = cluster.control;
+    if ((ctl.launcher || '').toLowerCase().includes('sparkring')) {
+      return [
+        `${ctl.serve_dir}/${ctl.launcher} stop    # model off — mesh supervisors stay`,
+        `${ctl.serve_dir}/${ctl.launcher} down    # full teardown (model + mesh)`,
+      ];
+    }
     const cmd = `cd ${ctl.serve_dir} && bash ${ctl.launcher} --down 2>&1`;
     return [`${cmd}    # head: ${headName}`, `${cmd}    # worker: ${workerName}`];
   }, [cluster]);
@@ -602,9 +608,11 @@ function ControlConsole({ cluster, accent }: { cluster: ClusterTopology; accent:
         title="Stop the serving pair?"
         summary={
           <>
-            Runs the head <span className="font-mono text-hi">--down</span>, then the worker. Serving stops for that
-            cluster — <strong className="text-hi">every consumer of the model (OWUI/Hermes/DSH)</strong> loses it
-            until the next start.
+            Row-managed clusters: <span className="font-mono text-hi">stop</span> takes the model down while the
+            mesh supervisors keep running; <span className="font-mono text-hi">down</span> tears the mesh down too
+            (use before host reboots). Legacy pairs run <span className="font-mono text-hi">--down</span> per node.
+            Serving stops for that cluster — <strong className="text-hi">every consumer of the model (OWUI/Hermes/DSH)</strong>{' '}
+            loses it until the next start.
           </>
         }
         commands={stopCommands}

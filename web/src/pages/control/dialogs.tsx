@@ -126,19 +126,34 @@ interface TimeoutPreset {
   note: string;
 }
 const TIMEOUT_PRESETS: readonly TimeoutPreset[] = [
-  { s: 720, note: 'steady-state reload — the usual warm start' },
-  { s: 1900, note: 'cold JIT first boot on a new image' },
+  { s: 900, note: 'warm reload — usual steady-state start' },
+  { s: 1800, note: 'checkpoint reload with graph warm-up' },
+  { s: 2700, note: 'cold JIT / fresh image first boot (TP4 ring default)' },
 ];
-const TIMEOUT_MIN = 180;
-const TIMEOUT_MAX = 3600;
-const TIMEOUT_DEFAULT = 720;
+const TIMEOUT_MIN = 300;
+const TIMEOUT_MAX = 5400;
+const TIMEOUT_DEFAULT = 2700;
 
 function envFileOf(node: NodeConfig | undefined, profileKey: string): string {
   return `rank-${node?.env_rank ?? 0}-${profileKey}.env`;
 }
 
+/** Ring (sparkring.sh) consoles run on the controller; TP2 pairs run the
+    env-file launcher per node, worker first. */
+function isRingControl(ctl: ClusterTopology['control']): boolean {
+  return (ctl.launcher || '').toLowerCase().includes('sparkring');
+}
+
 function startCommands(cluster: ClusterTopology, profileKey: string, extra: string): string[] {
   const ctl = cluster.control;
+  if (isRingControl(ctl)) {
+    return [
+      `# controller host — ${ctl.serve_dir}`,
+      `./${ctl.launcher} up      # mesh supervisors (no model)`,
+      `./${ctl.launcher} start   # model + readiness wait (auto-latest prep)`,
+      `./${ctl.launcher} liveness # API :8015 + liveness :8016`,
+    ];
+  }
   const head = cluster.nodes.find((n) => n.id === ctl.head_node_id);
   const worker = cluster.nodes.find((n) => n.id === ctl.worker_node_id);
   const extraPart = extra.trim();
@@ -268,7 +283,7 @@ export function StartDialog({
           spellCheck={false}
           placeholder="— (pairctl EXTRA)"
         />
-        <span className="text-2xs text-low">prefilled from the cluster&apos;s start_extra; passed verbatim to launcher --run.</span>
+        <span className="text-2xs text-low">prefilled from the cluster&apos;s start_extra; passed verbatim to the launcher (TP2 pairs only; ring ignores it).</span>
       </label>
 
       {/* skip preflight toggle */}

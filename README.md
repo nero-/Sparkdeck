@@ -1,8 +1,11 @@
 # Sparkdeck
 
-**Unified cluster controller & operator console** for DGX Spark / ASUS Ascent
-GX10 pairs serving **GLM-5.3-Flash** (2×GB10 per cluster, TP2). Runs on the
-operator's machine; speaks SSH only; installs **nothing** on the nodes except
+**Unified cluster controller & operator console** for the **SparkRing** GLM-5.3-Flash
+TP4/DCP1 four-Spark ring (one cluster, 4×GB10, same LAN addresses as the old
+TP2 pairs; legacy TP2 pair flow is still supported side by side via
+Settings ▸ Clusters). Runs on the operator's machine; lifecycle goes through
+the managed `sparkring.sh` suite on the controller host, per-node telemetry
+speaks SSH only; installs **nothing** on the nodes except
 a stdlib-only collector script (`~/.sparkdeck/collector.py`, uploaded on
 first contact, sha-verified).
 
@@ -19,8 +22,8 @@ $ make doctor         # read-only probe of the configured nodes
 | Area | Details |
 |---|---|
 | **Monitoring** | Live per-node metrics — GPU util/temp/power/clocks/throttle-reasons, unified-memory envelope (official GB10 rule: `/proc/meminfo` MemAvailable(+SwapFree)), per-core CPU, load, PSI, per-interface net kbit/s (LAN + CX7 fabric + tailscale), disk MB/s, thermal zones, per-serving-container docker stats, plus the full curated set of vLLM engine metrics (both v0/v1 metric-name generations). Swappable series, timescales 5m→7d, local history (2s live rings + 1m/10m rollups in SQLite with retention). |
-| **Cluster control** | GLM-5.3-Flash profile load/unload **exactly mirroring pairctl.sh semantics** (preflight: swappiness→0 + page-cache drop; RoCE GID re-check + auto-fix; stale teardown; worker-first start; health wait; `--verify` markers; boot-time KV pool capture) driven through each node's own `glm53_pair_serve.sh`. Live streamed op logs, full audit trail, cancellation. |
-| **Inference** | Live LLM telemetry (decode/prefill tok/s, TTFT p50/p95, TPOT, queue/KV usage, spec-decode acceptance, preemptions) + an OpenAI-compatible streaming **chat console** with per-response TTFT/tok/s measurement. |
+| **Cluster control** | SparkRing lifecycle through the managed console (`sparkring.sh up/start/ready/stop/down/recover/status/logs/native-check`) — plan→apply→receipt semantics, only suite verbs (never direct docker/routing), plus `doctor --verify` preflight on r0 and the :8016 liveness feed. Legacy TP2 `glm53_pair_serve.sh` pair flow (preflight + GID + worker-first) is kept for compatibility clusters. Both paths: streamed op logs, step chips, cancel, full audit. |
+| **Inference** | Live LLM telemetry (decode/prefill tok/s, TTFT p50/p95, TPOT, queue/KV usage, spec-decode acceptance, preemptions, scheduler blocked/stalled from the ring liveness port) + an OpenAI-compatible streaming **chat console** with per-response TTFT/tok/s measurement. |
 | **Bench** | One-click runs of the operator's own `llm-inference-bench` tool (`bench/llm_decode_bench.py`) with presets from OPS-GUIDE, checkpoint-based live per-cell progress, parsed summary grids (aggregate tok/s matrix, prefill table, spec-accept, coding-peak), history across runs (stored + repo artifacts), run reports written as `run-NN-*.md`. |
 | **Images / engine** | docker image inventory (filtered), SERVING_IMAGE cross-check per profile/env-file, copy image between pair nodes over the CX7 (docker save‖load), trigger detached image builds on the builder host with streamed logs, switch a profile's SERVING_IMAGE (with preview + confirmation). |
 | **Logs** | Follow serving container logs (`docker logs -f`) with ANSI rendering, filters, download. |
@@ -48,10 +51,11 @@ a future adapter can extend `backend/sparkdeck/control/`.
   the operator's `~/.ssh/config`, including Tailscale ProxyJump aliases like
   `gx10-r0-ts`); sudo honors `PAIR_SUDO_PASSWORD` env → `~/.pair-sudo` →
   in-session password (never persisted outside those existing conventions).
-- GB10 facts encoded: nvidia-smi memory *not* exposed (unified memory),
-  page cache counts against free CUDA memory (hence drop_caches in
-  preflight), ~119–120 GiB served envelope is healthy, > 121.5 GiB OOM risk;
-  GID index drifts after reboots (auto-check/re-fix mirrors pairctl).
+- GB10 facts encoded: nvidia-smi memory *not* exposed (unified memory);
+  SparkRing memory envelope per node ≈ 40 GiB weights + 24 GiB KV (fp8) +
+  graphs/JIT/pagecache — alerts are **percent of total** (default warn 95 %,
+  crit 98 %) so LLM-dense operation doesn't cry wolf; ring fabric is a direct
+  cable loop (198.18.0–3/24, GID index 3 pinned via `addr-gen-mode eui64`).
 
 ## Repo layout
 
@@ -79,8 +83,9 @@ JSON present & parseable** (the tool exits 0 even on dead servers), feeds
 
 ## Verification status (as of 2026-09-07)
 
-- REST + WS + full start/stop lifecycle (10 steps incl. preflight/GID/KV)
-  green against the **mock world** over a real uvicorn server.
+- REST + WS + full start/stop lifecycle now exercised through the **SparkRing
+  console flow** (mock world) over a real uvicorn server (legacy TP2 engine
+  still covered).
 - Parsers + LTTB + bench `summarize` unit-tested (incl. both vLLM metric
   generations and the 83-field CellResult shape).
 - **Real hardware**: all 4 GB10 nodes connect; collector deploys + streams on

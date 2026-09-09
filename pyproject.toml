@@ -1,6 +1,6 @@
 [project]
 name = "sparkdeck"
-version = "1.0.0"
+version = "1.1.0"
 description = "Unified cluster controller & operator console for DGX Spark / GX10 pairs serving GLM-5.3-Flash"
 requires-python = ">=3.11"
 dependencies = [

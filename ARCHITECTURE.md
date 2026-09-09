@@ -128,6 +128,30 @@ temp.nvme[<k>]` `docker.<ctr>.cpu_pct docker.<ctr>.mem_gib`
 vllm.num_waiting vllm.kv_usage_perc vllm.prefix_hit_perc vllm.ttft_ms_p50
 vllm.ttft_ms_p95 vllm.tpot_ms_p50 vllm.spec_accept_perc vllm.req_active`.
 
+## SparkRing TP4 facts (from ~/Builds/sparkring-deploy + OPERATIONS.md)
+
+- One cluster, 4 ranks, one model: `glm-5.3-flash-spark` (NVFP4-spark),
+  API `192.168.50.23:8015` (OpenAI-compatible, no auth, LAN only),
+  liveness `:8016/liveness` (healthy/running_requests/kv_cache_usage/
+  blocked_seconds/output_stalled_seconds). Mesh 9975, graph 9970/9971,
+  master 29775. vLLM /metrics rides the API port alongside.
+- Lifecycle is console-driven ON THE CONTROLLER: `sparkring.sh
+  up|start|ready|stop|down|recover|status|logs|native-check|liveness` —
+  every action writes a plan + receipt JSON (sha256-approved apply).
+  `sparkring doctor --verify` runs on r0. Containers are `glm-tp4-r{0..3}`,
+  ONE per node.
+- Invariants from the repo's AGENTS/OPERATIONS docs: never touch containers
+  or routing directly, always the managed suite; image swaps follow the
+  runbook (staging → install → up), `systemd-networkd` masked, NM owns the
+  links; GID index is FIXED at 3 with `ipv6.addr-gen-mode eui64`.
+- Per-node memory envelope: ~40 GiB weights + 24 GiB KV (fp8_ds_mla) +
+  graphs/JIT/pagecache of 128 GiB unified → alerts default to **95 % / 98 %
+  of total** instead of absolute GiB.
+- Measured on the ring (image 35db0557…): prefill ~3470 tok/s @8k, C1 decode
+  58 tok/s, MTP acceptance 2.3–2.5 of 3, KV ~2,278,454 tokens cluster-wide.
+- The 2026 TP2 pair facts below are kept as legacy context; the legacy
+  `glm53_pair_serve.sh` engine path still exists for compatibility.
+
 ## Verified node facts (from the operator's builds and confirmed live 2026-09-07)
 
 - All four GB10 nodes connect over SSH (LAN) with the operator's keys; fabric

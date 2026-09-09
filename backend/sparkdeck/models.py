@@ -60,17 +60,20 @@ class ProfileDef(BaseModel):
     mm_images: int | None = None
     mm_videos: int | None = None
     notes: str | None = None
+    # design KV capacity in tokens (SparkRing TP4: ~2.28 M cluster-wide);
+    # shown by the console and pushed into the hub's KV notes on start
+    kv_tokens: int | None = None
 
 
 class ClusterControl(BaseModel):
-    repo_dir: str = "~/builds/glm53-flash-dgx-spark-tp2"
-    serve_dir: str = (
-        "~/builds/glm53-flash-dgx-spark-tp2/serve/"
-        "TP2-DGX-Spark-GLM5.3F-Jovian-Judgement"
-    )
-    launcher: str = "glm53_pair_serve.sh"
-    start_extra: str = "--recurrent-checkpoint-policy request_boundaries"
-    health_timeout_s: int = 720
+    # Shared surface. The launcher basename decides the control plane:
+    #   sparkring.sh        → managed-mesh verbs (TP4 ring, plan/apply/receipt)
+    #   glm53_pair_serve.sh → legacy TP2 env-file pair flow (kept for compat)
+    repo_dir: str = "~/Builds/sparkring-deploy"
+    serve_dir: str = "~/Builds/sparkring-deploy"
+    launcher: str = "sparkring.sh"
+    start_extra: str = ""
+    health_timeout_s: int = 2700
     head_node_id: IDT = ""
     worker_node_id: IDT = ""
 
@@ -78,7 +81,7 @@ class ClusterControl(BaseModel):
 class ClusterConfig(BaseModel):
     id: IDT = Field(default_factory=new_id)
     name: str
-    kind: Literal["tp2"] = "tp2"
+    kind: str = "sparkring-tp4"
     accent_color: str = "#22D3EE"
     notes: str | None = None
     control: ClusterControl = Field(default_factory=ClusterControl)
@@ -95,11 +98,11 @@ class RetentionSettings(BaseModel):
 
 
 class AlertSettings(BaseModel):
-    # GB10 unified memory: ~119–120.7 GiB used is NORMAL while serving a big
-    # NVFP4 model with pinned KV (live r2 measurement 120.7); host OOM risk
-    # sits around ~121.5 GiB (RECIPE) — headline thresholds sit just under it.
-    mem_warn_gib: float = 121.0
-    mem_crit_gib: float = 121.4
+    # Memory thresholds are PERCENT of the node's unified-memory total —
+    # these clusters serve LLMs with deliberately high-resident memory, so
+    # absolute-GiB alarm lines kept firing during normal operation.
+    mem_warn_pct: float = 95.0
+    mem_crit_pct: float = 98.0
     gpu_temp_warn_c: float = 86.0
     gpu_temp_crit_c: float = 94.0  # GB10 zones throttle near ~96 °C
     container_restarts: int = 3
@@ -214,6 +217,9 @@ class ServiceState(BaseModel):
     kv_tokens: int | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
+    # SparkRing/TP4: liveness (:8016) snapshot — healthy/running_requests/
+    # kv_cache_usage/blocked_seconds/output_stalled_seconds (+model/version)
+    liveness: dict | None = None
 
 
 class SeriesDef(BaseModel):

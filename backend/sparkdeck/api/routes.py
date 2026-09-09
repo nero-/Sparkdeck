@@ -725,7 +725,7 @@ def default_profile_key(cl: dict) -> str:
     for p in profiles:
         if p.get("key") == "mtp3-spark":
             return p["key"]
-    return profiles[0]["key"] if profiles else "mtp3-spark"
+    return profiles[0]["key"] if profiles else "tp4-mtp3"
 
 
 def profile_key_valid(cl: dict, key: str) -> bool:

@@ -7,111 +7,113 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import os
+
 from .db import DB, jdumps, jloads
 from .models import AppSettings, ClusterConfig, ClusterControl, NodeAddress, NodeConfig, ProfileDef
 
 # ---------------- seeding (the operator's real topology) -------------------
+#
+# 2026-09: the two TP2 pairs were consolidated into ONE four-node SparkRing
+# (GLM-5.3 Flash TP4/DCP1, managed mesh). One cluster, 4 ranks:
+#   r0 = head / API (:8015) + liveness (:8016) + mesh supervisor + staging seed
+#   r1..r3 = one quarter of the model each (glm-tp4-rN containers)
 
-_KV = {"mtp3-spark": 10.5, "mtp3-nvfp4": 6.5, "df-spark": 12.5, "df-nvfp4": 4.5}
-_CTX = {"mtp3-spark": 524288, "mtp3-nvfp4": 524288, "df-spark": 262144, "df-nvfp4": 262144}
-_MMV = {"mtp3-spark": 0, "mtp3-nvfp4": 0, "df-spark": 0, "df-nvfp4": 1}
-_SPEC = {"mtp3-spark": "mtp3-adaptive", "mtp3-nvfp4": "mtp3-adaptive", "df-spark": "dflash2", "df-nvfp4": "dflash2"}
-_QUANT = {"mtp3-spark": "spark", "mtp3-nvfp4": "nvfp4", "df-spark": "spark", "df-nvfp4": "nvfp4"}
-_LABEL = {
-    "mtp3-spark": "MTP3 · spark quant · daily driver",
-    "mtp3-nvfp4": "MTP3 · non-spark NVFP4",
-    "df-spark": "DFlash2@7 · spark quant",
-    "df-nvfp4": "DFlash2@7 · non-spark · video",
-}
-_PROFILE_ORDER = ["mtp3-spark", "mtp3-nvfp4", "df-spark", "df-nvfp4"]
-
-_GLM_PROFILES = {
-    "mtp3-spark": ProfileDef(
-        id="c1-mtp3-spark", cluster_id="c1", key="mtp3-spark",
-        label=_LABEL["mtp3-spark"], kv_pin_gib=_KV["mtp3-spark"], context=_CTX["mtp3-spark"],
-        speculator=_SPEC["mtp3-spark"], quant=_QUANT["mtp3-spark"], mm_images=4, mm_videos=0,
-    ),
-    "mtp3-nvfp4": ProfileDef(
-        id="c1-mtp3-nvfp4", cluster_id="c1", key="mtp3-nvfp4",
-        label=_LABEL["mtp3-nvfp4"], kv_pin_gib=_KV["mtp3-nvfp4"], context=_CTX["mtp3-nvfp4"],
-        speculator=_SPEC["mtp3-nvfp4"], quant=_QUANT["mtp3-nvfp4"], mm_images=4, mm_videos=0,
-    ),
-    "df-spark": ProfileDef(
-        id="c1-df-spark", cluster_id="c1", key="df-spark",
-        label=_LABEL["df-spark"], kv_pin_gib=_KV["df-spark"], context=_CTX["df-spark"],
-        speculator=_SPEC["df-spark"], quant=_QUANT["df-spark"], mm_images=4, mm_videos=0,
-        notes="DFlash2 draft is CC BY-NC-ND (non-commercial).",
-    ),
-    "df-nvfp4": ProfileDef(
-        id="c1-df-nvfp4", cluster_id="c1", key="df-nvfp4",
-        label=_LABEL["df-nvfp4"], kv_pin_gib=_KV["df-nvfp4"], context=_CTX["df-nvfp4"],
-        speculator=_SPEC["df-nvfp4"], quant=_QUANT["df-nvfp4"], mm_images=4, mm_videos=1,
-        notes="DFlash2 draft is CC BY-NC-ND (non-commercial).",
-    ),
+# Straight cable ring (no switch): r0.p0↔r1.p1, r1.p0↔r2.p1, r2.p0↔r3.p1,
+# r3.p0↔r0.p1; primaries 198.18.0–3.0/24 with .10/.11 per edge. Node-to-node
+# only — the controller host cannot reach these; kept last in failover order.
+_RING_EDGES = {
+    0: ("198.18.0.10", "198.18.3.10"),  # (cw edge, ccw edge) primary addresses
+    1: ("198.18.1.10", "198.18.0.11"),
+    2: ("198.18.2.10", "198.18.1.11"),
+    3: ("198.18.3.11", "198.18.2.11"),
 }
 
-
-def _glm_profiles_for(cluster_id: str) -> list[ProfileDef]:
-    out = []
-    for key in _PROFILE_ORDER:
-        p = _GLM_PROFILES[key].model_copy(deep=True)
-        p.cluster_id = cluster_id
-        p.id = f"{cluster_id}-{key}"
-        out.append(p)
-    return out
-
-
-_SEED_NODES = [
-    # cluster, name, role, lan, fabric, ts-alias, env_rank
-    ("c1", "gx10-r0", "head", "192.168.50.23", "10.100.80.2", "gx10-r0-ts", 0),
-    ("c1", "gx10-r1", "worker", "192.168.50.192", "10.100.80.1", "gx10-r1-ts", 1),
-    ("c2", "gx10-r2", "head", "192.168.50.90", "10.100.120.2", "gx10-r2-ts", 2),
-    ("c2", "gx10-r3", "worker", "192.168.50.5", "10.100.120.1", "gx10-r3-ts", 3),
+_SEED_RANKS = [
+    # rank, name, role, lan, tailscale-alias
+    (0, "gx10-r0", "head", "192.168.50.23", "gx10-r0-ts"),
+    (1, "gx10-r1", "worker", "192.168.50.192", "gx10-r1-ts"),
+    (2, "gx10-r2", "worker", "192.168.50.90", "gx10-r2-ts"),
+    (3, "gx10-r3", "worker", "192.168.50.5", "gx10-r3-ts"),
 ]
 
 
 def _seed_nodes(cluster_id: str) -> list[NodeConfig]:
     out = []
-    for cid, name, role, lan, fabric, ts, rank in _SEED_NODES:
-        if cid != cluster_id:
-            continue
+    for rank, name, role, lan, ts in _SEED_RANKS:
+        cw, ccw = _RING_EDGES[rank]
         out.append(
             NodeConfig(
-                id=f"{cid}-n{rank}",
+                id=f"{cluster_id}-n{rank}",
                 cluster_id=cluster_id,
                 name=name,
                 role=role,  # type: ignore[arg-type]
                 ssh_user="nero",
                 env_rank=rank,
+                api_port=8015 if rank == 0 else 0,  # 0 = no API on this rank
                 addresses=[
                     NodeAddress(kind="lan", host=lan, label="LAN"),
                     NodeAddress(kind="tailscale", host=ts, label="Tailscale"),
-                    NodeAddress(kind="fabric", host=fabric, label="CX7 rail (node-to-node only)"),
+                    NodeAddress(kind="fabric", host=cw, label="ring cw (node-to-node)"),
+                    NodeAddress(kind="fabric", host=ccw, label="ring ccw (node-to-node)"),
                 ],
             )
         )
     return out
 
 
-const_SEED_CLUSTERS = {
-    "c1": ClusterConfig(
-        id="c1",
-        name="Cluster 1 · gx10-r0/r1",
+def _sparkring_dir() -> str:
+    override = os.environ.get("SPARKDECK_SPARKRING_DIR")
+    if override and override.strip():
+        return override
+    return "~/Builds/sparkring-deploy"
+
+
+def _seed_cluster(cluster_id: str = "c1") -> ClusterConfig:
+    return ClusterConfig(
+        id=cluster_id,
+        name="SparkRing · gx10 ×4 (TP4)",
+        kind="sparkring-tp4",
         accent_color="#22D3EE",
-        notes="Primary pair. History: the agent runtime rode inside this pair's "
-        "containers until 2026-09-07 — treat lifecycle ops with care.",
-        control=ClusterControl(head_node_id="c1-n0", worker_node_id="c1-n1"),
-        profiles=_glm_profiles_for("c1"),
-    ),
-    "c2": ClusterConfig(
-        id="c2",
-        name="Cluster 2 · gx10-r2/r3",
-        accent_color="#A78BFA",
-        notes="Second pair on the LAN switch (10.100.120.x rail). Same image line, same four profiles.",
-        control=ClusterControl(head_node_id="c2-n2", worker_node_id="c2-n3"),
-        profiles=_glm_profiles_for("c2"),
-    ),
-}
+        notes="GLM-5.3 Flash TP4/DCP1 managed-mesh ring. API 192.168.50.23:8015 "
+        "(OpenAI-compatible, LAN-only); liveness :8016/liveness; mesh 9975, "
+        "graph control 9970/9971, master 29775. Lifecycle ONLY via "
+        "sparkring.sh (managed suite) — never touch containers/routing directly.",
+        control=ClusterControl(
+            serve_dir=_sparkring_dir(),
+            repo_dir=_sparkring_dir(),
+            launcher="sparkring.sh",
+            start_extra="",
+            health_timeout_s=2700,
+            head_node_id=f"{cluster_id}-n0",
+            worker_node_id="",
+        ),
+        profiles=[
+            ProfileDef(
+                id=f"{cluster_id}-tp4-mtp3",
+                cluster_id=cluster_id,
+                key="tp4-mtp3",
+                label="GLM-5.3 Flash — TP4/DCP1 · native MTP3 · NVFP4-spark",
+                served_model_name="glm-5.3-flash-spark",
+                model_dir_hint="~/models/glm53-flash-nvfp4-spark",
+                kv_pin_gib=24.0,  # per rank, fp8 (fp8_ds_mla)
+                context=1_048_576,
+                speculator="native MTP depth 3",
+                quant="nvfp4-spark",
+                mm_images=None,
+                mm_videos=None,
+                kv_tokens=2_278_454,  # documented cluster-wide KV (fp8)
+                notes="TP4, DCP1 (compact index, SparkCache off); 8192-token "
+                "scheduler budget, prefill coalescing 4; ~175 GiB checkpoint "
+                "per rank at ~/models/glm53-flash-nvfp4-spark; measured 8K: "
+                "prefill ~3.5k tok/s, C1 decode 58 tok/s.",
+            ),
+        ],
+    )
+
+
+# Back-compat name used by tests + imports elsewhere.
+const_SEED_CLUSTERS = {"c1": _seed_cluster("c1")}
 
 
 async def seed_if_empty(db: DB) -> None:
@@ -158,6 +160,8 @@ def default_app_settings() -> AppSettings:
         candidates.append(Path(env_dir))
     home = Path.home()
     candidates += [
+        home / "Builds",                                   # 2026-09: tool moved to ~/Builds root
+        home / "Builds" / "sparkring-deploy",
         home / "Agent" / "Builds" / "glm53-flash-dgx-spark-tp2" / "bench",
         home / "builds" / "glm53-flash-dgx-spark-tp2" / "bench",
         Path("/opt/glm53-flash-dgx-spark-tp2/bench"),
@@ -168,8 +172,90 @@ def default_app_settings() -> AppSettings:
             venv = cand / ".venv" / "bin" / "python"
             if venv.exists():
                 s.bench.venv_python = str(venv)
+            else:
+                venv_b = cand / "bench" / ".venv" / "bin" / "python"
+                if venv_b.exists():
+                    s.bench.venv_python = str(venv_b)
             break
     return s
+
+
+# ---------------- bootstrap: seed + topology migration ----------------------
+
+TOPOLOGY_REV = 2  # 1 = TP2 pairs seed; 2 = single SparkRing TP4 cluster
+
+
+async def _wipe_topology(db: DB) -> None:
+    await db.execute("DELETE FROM profiles")
+    await db.execute("DELETE FROM nodes")
+    await db.execute("DELETE FROM clusters")
+
+
+async def _seed_topology(db: DB) -> None:
+    for i, cl in enumerate(const_SEED_CLUSTERS.values()):
+        await db.execute(
+            "INSERT INTO clusters(id,name,kind,accent_color,notes,control,ord) VALUES(?,?,?,?,?,?,?)",
+            (cl.id, cl.name, cl.kind, cl.accent_color, cl.notes, cl.control.model_dump_json(), i),
+        )
+        for j, node in enumerate(_seed_nodes(cl.id)):
+            await db.execute(
+                "INSERT INTO nodes(id,cluster_id,name,role,ssh_user,ssh_port,ssh_alias,"
+                "env_rank,addresses,api_port,interest_ifaces,enabled,ord)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (node.id, node.cluster_id, node.name, node.role, node.ssh_user, node.ssh_port,
+                 node.ssh_alias, node.env_rank,
+                 node.addresses and jdumps([a.model_dump() for a in node.addresses]),
+                 node.api_port, jdumps(node.interest_ifaces), int(node.enabled), j),
+            )
+        for j, prof in enumerate(reversed(cl.profiles)):
+            await db.execute(
+                "INSERT INTO profiles(id,cluster_id,key,label,served_model_name,model_dir_hint,"
+                "kv_pin_gib,context,speculator,quant,mm_images,mm_videos,notes,kv_tokens,ord)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (prof.id, prof.cluster_id, prof.key, prof.label, prof.served_model_name,
+                 prof.model_dir_hint, prof.kv_pin_gib, prof.context, prof.speculator, prof.quant,
+                 prof.mm_images, prof.mm_videos, prof.notes, prof.kv_tokens, 100 - j),
+            )
+
+
+async def _set_topology_rev(db: DB) -> None:
+    rows = await db.fetch_all("SELECT value FROM settings WHERE key='app'")
+    app = jloads(rows[0]["value"], {}) if rows else {}
+    app["_topology_rev"] = TOPOLOGY_REV
+    await set_settings_row(db, "app", app)
+
+
+async def _app_row_ok(db: DB) -> bool:
+    return bool(await db.fetch_one("SELECT key FROM settings WHERE key='app'"))
+
+
+async def ensure_topology(db: DB) -> dict:
+    """Seed when empty; migrate a rev-1 (TP2-pairs) layout to the current
+    seed. Returns {"action": seeded|migrated|kept, "rev": n}."""
+    row = await db.fetch_one("SELECT COUNT(*) AS n FROM clusters")
+    assert row is not None
+    if row["n"] == 0:
+        await _seed_topology(db)
+        if not await _app_row_ok(db):
+            await set_settings_row(db, "app", default_app_settings().model_dump())
+        await _set_topology_rev(db)
+        return {"action": "seeded", "rev": TOPOLOGY_REV}
+    rows = await db.fetch_all("SELECT control FROM clusters")
+    legacy = any("glm53_pair_serve" in (r["control"] or "") for r in rows)
+    if not legacy:
+        if not await _app_row_ok(db):
+            await set_settings_row(db, "app", default_app_settings().model_dump())
+            await _set_topology_rev(db)
+        return {"action": "kept", "rev": TOPOLOGY_REV}
+    # legacy TP2-pairs layout: replace with the consolidated SparkRing seed
+    await _wipe_topology(db)
+    await _seed_topology(db)
+    await _set_topology_rev(db)
+    return {"action": "migrated", "rev": TOPOLOGY_REV}
+
+
+async def seed_if_empty(db: DB) -> None:  # legacy entry (tests)
+    await ensure_topology(db)
 
 
 # ---------------- CRUD ------------------------------------------------------

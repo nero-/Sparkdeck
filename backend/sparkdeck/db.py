@@ -122,6 +122,13 @@ class DB:
             with conn:
                 for stmt in SCHEMA:
                     conn.execute(stmt)
+                # legacy DBs: add columns that post-date the original schema
+                cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles)")}
+                try:
+                    if "kv_tokens" not in cols:
+                        conn.execute("ALTER TABLE profiles ADD COLUMN kv_tokens INTEGER")
+                except sqlite3.OperationalError:
+                    pass  # readonly/migrated DB — additive column is optional
                 conn.execute(
                     "INSERT OR IGNORE INTO meta(key,value) VALUES ('schema','1')"
                 )

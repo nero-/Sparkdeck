@@ -13,8 +13,8 @@ type Alerts = AppSettings['alerts'];
 
 export function AlertsSection({ gate }: { gate: SettingsGate }) {
   const [d, setD] = useState<Alerts>({
-    mem_warn_gib: 121,
-    mem_crit_gib: 121.4,
+    mem_warn_pct: 95,
+    mem_crit_pct: 98,
     gpu_temp_warn_c: 86,
     gpu_temp_crit_c: 94,
     container_restarts: 3,
@@ -28,7 +28,7 @@ export function AlertsSection({ gate }: { gate: SettingsGate }) {
 
   const webhookDraft = d.webhook_url ?? '';
   const webhookOk = webhookDraft === '' || /^https?:\/\//.test(webhookDraft);
-  const memOk = d.mem_warn_gib < d.mem_crit_gib;
+  const memOk = d.mem_warn_pct > 0 && d.mem_warn_pct < d.mem_crit_pct && d.mem_crit_pct <= 100;
   const tempOk = d.gpu_temp_warn_c < d.gpu_temp_crit_c;
   const restartsOk = Number.isInteger(d.container_restarts) && d.container_restarts >= 0;
   const valid = webhookOk && memOk && tempOk && restartsOk;
@@ -54,7 +54,7 @@ export function AlertsSection({ gate }: { gate: SettingsGate }) {
     <SectionWrap
       id="alerts"
       title="Alerts"
-      sub="mem envelope, gpu temps, container restarts, webhook"
+      sub="memory envelope (% of node total), gpu temps, restarts, webhook"
       right={
         <Chip variant="neutral" title="the alert engine evaluates against sampled frames on every sampler tick">
           evaluated every tick
@@ -64,23 +64,25 @@ export function AlertsSection({ gate }: { gate: SettingsGate }) {
       <div className="sd-panel grid gap-3 p-4 lg:grid-cols-3">
         <NumField
           label="Memory warn"
-          value={d.mem_warn_gib}
-          unit="GiB"
-          min={0}
-          max={128}
-          onChange={(v) => v !== null && patch({ mem_warn_gib: v })}
-          hint="120.5 GiB ≈ the envelope; keep warn below it"
+          value={d.mem_warn_pct}
+          unit="% of total"
+          min={1}
+          max={99}
+          onChange={(v) => v !== null && patch({ mem_warn_pct: v })}
+          hint="LLM serving runs high on purpose — default fires at 95% of the node's unified memory"
           required
         />
         <NumField
           label="Memory crit"
-          value={d.mem_crit_gib}
-          unit="GiB"
-          min={0}
-          max={128}
-          onChange={(v) => v !== null && patch({ mem_crit_gib: v })}
+          value={d.mem_crit_pct}
+          unit="% of total"
+          min={95}
+          max={100}
+          onChange={(v) => v !== null && patch({ mem_crit_pct: v })}
+          hint="crit default sits at 98% — OOM pressure zone"
           required
         />
+        {!memOk && <FieldMsg tone="error">mem crit must stay above mem warn (both 1–100 %)</FieldMsg>}
         <NumField
           label="Container restarts"
           value={d.container_restarts}
@@ -91,7 +93,6 @@ export function AlertsSection({ gate }: { gate: SettingsGate }) {
           hint="alerts at N restarts per hour"
           required
         />
-        {!memOk && <FieldMsg tone="error">mem warn must stay below mem crit</FieldMsg>}
         <NumField
           label="GPU temp warn"
           value={d.gpu_temp_warn_c}

@@ -23,6 +23,21 @@ async def probe_endpoint(rt, port: int) -> dict:
             out[name] = parser(res.stdout)
         except Exception:
             out[name] = None
+    # SparkRing/TP4 liveness (:8016/liveness on the head) — small JSON with
+    # scheduler gauges; merged into the same probe result (non-fatal if absent)
+    try:
+        lv = await rt.exec(f"curl -fsS -m 5 http://127.0.0.1:{int(port) + 1}/liveness 2>/dev/null", timeout=10)
+        raw = (lv.stdout or "").strip()
+        data = json.loads(raw) if raw else None
+        if isinstance(data, dict) and data:
+            out["liveness"] = {
+                k: data.get(k) for k in
+                ("healthy", "running_requests", "kv_cache_usage",
+                 "blocked_seconds", "output_stalled_seconds", "model", "version")
+                if k in data
+            }
+    except Exception:
+        out["liveness"] = None
     ok = out.get("health") is not None
     out["ok"] = bool(ok)
     if not out.get("models"):

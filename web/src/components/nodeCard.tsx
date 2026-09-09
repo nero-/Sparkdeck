@@ -16,17 +16,17 @@ import { fmtGiB, fmtNum } from '../lib/format';
 import type { LiveNodeState, NodeConfig } from '../api/types';
 
 export interface NodeAlerts {
-  mem_warn_gib: number;
-  mem_crit_gib: number;
+  mem_warn_pct: number;
+  mem_crit_pct: number;
   gpu_temp_warn_c: number;
   gpu_temp_crit_c: number;
 }
 
 export const NODE_ALERT_DEFAULTS: Required<NodeAlerts> = {
-  mem_warn_gib: 118.5,
-  mem_crit_gib: 120.5,
-  gpu_temp_warn_c: 85,
-  gpu_temp_crit_c: 95,
+  mem_warn_pct: 95,
+  mem_crit_pct: 98,
+  gpu_temp_warn_c: 86,
+  gpu_temp_crit_c: 94,
 };
 
 function alertsFull(alerts: NodeAlerts | null | undefined): Required<NodeAlerts> {
@@ -151,27 +151,42 @@ export function GpuGaugeMini({ nodeId, accent }: { nodeId: string; accent: strin
 export function MemBarMini({ nodeId, alerts }: { nodeId: string; alerts: Required<NodeAlerts> }): ReactNode {
   const sample = useLive((s) => s.lastSampleByNode[nodeId]);
   const used = parseNum(sample?.series['mem.used_gib']);
-  const { mem_warn_gib: warn, mem_crit_gib: crit } = alerts;
-  const max = Math.max(crit, used !== null ? used + 2 : 0);
+  // the bar is anchored to the REAL memory total — anchoring it to the used
+  // value made the fill asymptote and stop moving (review + operator report)
+  const total = parseNum(sample?.series['mem.total_gib']);
+  const max = total !== null && total > 0 ? total : (used !== null ? used + 4 : 0);
+  const { mem_warn_pct: warnPct, mem_crit_pct: critPct } = alerts;
+  const warnGib = max > 0 ? (max * warnPct) / 100 : 0;
+  const critGib = max > 0 ? (max * critPct) / 100 : 0;
+  const pct = used !== null && max > 0 ? Math.min(100, (used / max) * 100) : null;
   const valueColor =
-    used === null ? 'var(--sd-low)' : used >= crit ? 'var(--sd-crit)' : used >= warn ? 'var(--sd-warn)' : 'var(--sd-mid)';
+    used === null ? 'var(--sd-low)'
+      : pct !== null && pct >= critPct ? 'var(--sd-crit)'
+        : pct !== null && pct >= warnPct ? 'var(--sd-warn)' : 'var(--sd-mid)';
   return (
-    <div className="min-w-0" title={`mem.used_gib — ${used === null ? 'no sample' : fmtGiB(used)}`}>
+    <div
+      className="min-w-0"
+      title={`mem.used_gib — ${used === null ? 'no sample' : `${fmtGiB(used)} of ${max > 0 ? fmtGiB(max) : '?'} (${pct === null ? '—' : pct.toFixed(1)}%)`}`}
+    >
       <div className="mb-0.5 flex items-baseline justify-between gap-2">
         <span className="sd-monolabel">mem</span>
         <span className="sd-num font-mono text-2xs" style={{ color: valueColor }}>
-          {fmtGiB(used)}
+          {used === null ? '—' : `${fmtGiB(used)} · ${pct === null ? '—' : pct.toFixed(0)}%`}
         </span>
       </div>
       <Bar
         value={used}
         max={max}
-        horizon={max > 0 ? warn / max : null}
-        thresholds={[
-          { at: warn, color: '#FBBF24' },
-          { at: crit, color: '#F87171' },
-        ]}
-        title={`mem used · ${fmtGiB(warn)} warn horizon · ${fmtGiB(crit)} crit`}
+        horizon={max > 0 ? warnGib / max : null}
+        thresholds={
+          max > 0
+            ? [
+                { at: warnGib, color: '#FBBF24' },
+                { at: critGib, color: '#F87171' },
+              ]
+            : []
+        }
+        title={`mem used of total · warn at ${warnPct}% · crit at ${critPct}% of ${max > 0 ? fmtGiB(max) : '?'}`}
         height={5}
       />
     </div>

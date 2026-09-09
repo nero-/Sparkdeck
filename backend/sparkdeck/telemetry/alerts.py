@@ -32,11 +32,15 @@ class AlertEngine:
         alerts = s.alerts
         checks: list[tuple[str, str, float, float]] = []  # (level, kind, value, threshold)
         used = series.get("mem.used_gib")
-        if used is not None:
-            if used >= alerts.mem_crit_gib:
-                checks.append(("error", "mem.crit", used, alerts.mem_crit_gib))
-            elif used >= alerts.mem_warn_gib:
-                checks.append(("warn", "mem.warn", used, alerts.mem_warn_gib))
+        total = series.get("mem.total_gib")
+        if used is not None and total is not None and total > 0:
+            warn_v = total * alerts.mem_warn_pct / 100.0
+            crit_v = total * alerts.mem_crit_pct / 100.0
+            pct = used / total * 100.0
+            if used >= crit_v:
+                checks.append(("error", "mem.crit", pct, alerts.mem_crit_pct))
+            elif used >= warn_v:
+                checks.append(("warn", "mem.warn", pct, alerts.mem_warn_pct))
         gpu_temp = series.get("gpu.temp")
         if gpu_temp is not None:
             if gpu_temp >= alerts.gpu_temp_crit_c:

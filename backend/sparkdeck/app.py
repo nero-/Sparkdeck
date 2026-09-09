@@ -4,6 +4,10 @@ telemetry series store, alerts, op engine, chat proxy and bench runner.
 
 from __future__ import annotations
 
+import logging
+
+MODEL_SPARK = "glm-5.3-flash-spark"
+
 import asyncio
 import hashlib
 import json
@@ -18,7 +22,13 @@ from .db import DB, jdumps, jloads, now_ms
 from .models import AppSettings, EventRec, OpRecord
 from .mock.world import MockWorld
 from .service.chat import ChatProxy
-from .settings_store import get_app_settings, get_topologies, patch_app_settings, seed_if_empty
+from .settings_store import (
+    ensure_topology,
+    get_app_settings,
+    get_topologies,
+    patch_app_settings,
+    seed_if_empty,
+)
 from .ssh.pool import SSHRuntime
 from .telemetry.alerts import AlertEngine
 from .telemetry.parser import check_structure, frame_to_series, service_state_from
@@ -65,6 +75,7 @@ class Application:
         self._stopping = False
         self.topology: list[dict] = []
         self.topology_lock = asyncio.Lock()
+        self.console_rt = None  # set in startup (Local / mock)
 
     @staticmethod
     async def _mock_chat_stream() -> AsyncIterator[str]:
@@ -81,7 +92,15 @@ class Application:
         from .control.engine import OpEngine  # late import avoids cycle
 
         await self.db.connect()
-        await seed_if_empty(self.db)
+        if self.cfg.mock:
+            self.console_rt = self._mock_console()
+        else:
+            from .control.localrt import LocalRuntime
+
+            self.console_rt = LocalRuntime(name="sparkring-console")
+        topo_action = await ensure_topology(self.db)
+        if topo_action["action"] == "migrated":
+            logging.getLogger("sparkdeck").info("topology migrated to the SparkRing TP4 seed (rev %s)", topo_action["rev"])
         self.settings_ref.settings = await get_app_settings(self.db)
         self.alerts = AlertEngine(self.db, self.settings_ref, self._emit_event)
         self.engine = OpEngine(self.db, self.hub)
@@ -145,23 +164,36 @@ class Application:
             self.runtimes[n["id"]] = rt
             await rt.start()
 
+    def _mock_console(self):
+        """Console runtime for mock mode: answers sparkring.sh verb
+        invocations with in-world lifecycle simulation."""
+        if self.mock_world is not None:
+            from .mock.world import MockConsoleRuntime
+
+            return MockConsoleRuntime(self.mock_world)
+        return None
+
     async def _start_mock(self) -> None:
         nodes = [n for c in self.topology for n in c["nodes"] if n.get("enabled", True)]
         if self.mock_world.on_state is None:
             self.mock_world.on_state = self._on_state
         # pre-serve cluster 1 so the console has a live world
-        self.mock_world.boot_cluster("c1", "mtp3-spark")
+        self.mock_world.boot_cluster("c1", "tp4-mtp3")
         lc = self.mock_world.cluster_of("c1")
         lc.healthy_at = time.time() - 240.0
+        first_profile = next((c["profiles"][0] for c in self.topology if c["profiles"]), None)
+        head = None
         for c in self.topology:
+            head = next((n for n in c["nodes"] if n.get("role") == "head"), None)
+            port = int((head or {}).get("api_port") or 8015)
             self.service[c["id"]] = {
                 "cluster_id": c["id"], "health": "up" if c["id"] == "c1" else "down",
-                "host": next((a["host"] for n in c["nodes"] if n["role"] == "head"
-                              for a in n["addresses"] if a["kind"] == "lan"), None),
-                "port": 8000, "model": "zai-org/GLM-5.3-Flash",
-                "served_models": ["zai-org/GLM-5.3-Flash"],
-                "image": lc.image, "profile_key": "mtp3-spark",
-                "age_s": lc.uptime_s, "kv_tokens": lc.kv_tokens,
+                "host": next((a["host"] for a in ((head or {}).get("addresses") or [])
+                              if a.get("kind") == "lan"), None),
+                "port": port, "model": MODEL_SPARK,
+                "served_models": [MODEL_SPARK],
+                "image": lc.image, "profile_key": (first_profile or {}).get("key", "tp4-mtp3"),
+                "age_s": lc.uptime_s, "kv_tokens": (first_profile or {}).get("kv_tokens"),
                 "metrics": {}, "errors": [],
             }
         await self.mock_world.start_frames(nodes, self.settings_ref.settings.sampling_interval_s,
@@ -303,15 +335,16 @@ class Application:
             rows = await self.db.fetch_all(
                 "SELECT profile_key, created FROM ops WHERE cluster_id=? AND kind='cluster.start'"
                 " AND state='ok' ORDER BY created DESC LIMIT 1", (cid,))
+            is_ring = "sparkring" in (cl["control"].get("launcher") or "").lower()
             if rows and st["health"] == "up":
                 st["profile_key"] = rows[0]["profile_key"]
-                if rows[0]["profile_key"]:
-                    key = rows[0]["profile_key"]
+                key = rows[0]["profile_key"]
+                if key and not is_ring:
+                    # TP2 flow: SERVING_IMAGE lives in the rank env files
                     for node in cl["nodes"]:
-                        vpro = None
-                        from .control.tp2 import Tp2Verbs
-
                         try:
+                            from .control.tp2 import Tp2Verbs
+
                             v = Tp2Verbs(cl["control"], node)
                             res = await rt.exec(
                                 "grep -E '^SERVING_IMAGE=' " +
@@ -323,9 +356,23 @@ class Application:
                                 break
                         except Exception:
                             pass
+                elif key:
+                    # SparkRing flow: image comes from the live container (read-only)
+                    try:
+                        res = await rt.exec(
+                            "docker inspect glm-tp4-r0 --format '{{.Config.Image}}' 2>/dev/null",
+                            timeout=10)
+                        img = res.stdout.strip()
+                        if img:
+                            st["image"] = img
+                    except Exception:
+                        pass
             kv = self.hub.kv_for(cid, st.get("profile_key"))
             if kv:
                 st["kv_tokens"] = kv
+            lv = probe.get("liveness")
+            if lv:
+                st["liveness"] = lv
             self.service[cid] = st
             await self.hub.publish_service(st)
 
@@ -335,7 +382,8 @@ class Application:
 
         nodes_by_id = {n["id"]: n for n in cluster.get("nodes", [])}
         return OpContext(cluster=cluster, nodes=nodes_by_id, runtime_of=self.runtime_of,
-                         alert_engine=self.alerts, hub=self.hub)
+                         alert_engine=self.alerts, hub=self.hub,
+                         console_runtime=self.console_rt)
 
     async def patch_settings(self, patch: dict) -> bool:
         old_interval = self.settings_ref.settings.sampling_interval_s

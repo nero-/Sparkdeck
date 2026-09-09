@@ -5,18 +5,18 @@ from pathlib import Path
 from sparkdeck.config import RuntimeConfig
 from sparkdeck.app import Application
 from sparkdeck.models import BenchJob
-from sparkdeck.settings_store import seed_if_empty, get_app_settings
+from sparkdeck.settings_store import ensure_topology, get_app_settings
 
 async def main():
     data = Path(__file__).resolve().parents[1] / '.tmpdata'
     cfg = RuntimeConfig(data_dir=data)
     a = Application(cfg)
     await a.db.connect()
-    await seed_if_empty(a.db)
+    await ensure_topology(a.db)
     a.settings_ref.settings = await get_app_settings(a.db)
     await a.reload_topology()
-    job = BenchJob(cluster_id='c2', profile_key='mtp3-nvfp4', label='sparkdeck-smoke',
-                   host='192.168.50.90', port=8000, model='zai-org/GLM-5.3-Flash', created=int(time.time()*1000))
+    job = BenchJob(cluster_id='c1', profile_key='tp4-mtp3', label='sparkdeck-smoke',
+                   host='192.168.50.23', port=8015, model='glm-5.3-flash-spark', created=int(time.time()*1000))
     job.args.concurrency = "1"; job.args.contexts = "0"; job.args.prefill_contexts = "8k"
     job.args.max_tokens = 128; job.args.duration = 8; job.args.kv_budget = None
     argv = a.bench._argv(job)

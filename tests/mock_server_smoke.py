@@ -55,7 +55,9 @@ async def test_rest(client: httpx.AsyncClient) -> list[str]:
     assert info["mock"] is True, info
     notes.append(f"system/info: {info['name']} {info['version']} mock={info['mock']}")
     clusters = (await client.get(f"{BASE}/api/clusters")).json()
-    assert len(clusters) == 2 and clusters[0]["nodes"], clusters
+    assert len(clusters) == 1 and clusters[0]["nodes"], clusters
+    assert clusters[0]["control"]["launcher"] == "sparkring.sh"
+    assert len(clusters[0]["nodes"]) == 4
     notes.append("clusters: " + ", ".join(f"{c['name']} ({len(c['nodes'])} nodes, {len(c['profiles'])} profiles)" for c in clusters))
     # wait for flow
     for _ in range(40):
@@ -67,7 +69,7 @@ async def test_rest(client: httpx.AsyncClient) -> list[str]:
     notes.append(f"metrics history: {len(r['series']['gpu.util']['t'])} pts gpu.util, mem {r['series'].get('mem.used_gib', {}).get('v', [None])[-1]}")
     # start/stop lifecycle through the op engine
     r = await client.post(f"{BASE}/api/clusters/c1/actions/start",
-                          json={"profile_key": "df-spark"})
+                          json={"profile_key": "tp4-mtp3"})
     assert r.status_code == 200, r.text
     op_id = r.json()["op_id"]
     state = None
@@ -81,7 +83,7 @@ async def test_rest(client: httpx.AsyncClient) -> list[str]:
     notes.append(f"cluster.start op ok; steps={len((await client.get(f'{BASE}/api/ops/{op_id}')).json()['steps'])}")
     for _ in range(30):
         svc = (await client.get(f"{BASE}/api/llm/c1/state")).json()
-        if svc.get("profile_key") == "df-spark" and svc.get("health") == "up" and svc.get("kv_tokens"):
+        if svc.get("profile_key") == "tp4-mtp3" and svc.get("health") == "up" and svc.get("kv_tokens"):
             break
         await asyncio.sleep(0.5)
     assert svc.get("health") == "up" and svc.get("kv_tokens"), svc
@@ -97,7 +99,7 @@ async def test_rest(client: httpx.AsyncClient) -> list[str]:
     notes.append("cluster.stop ok")
     # bench (mock world simulates the tool)
     r = await client.post(f"{BASE}/api/bench/jobs", json={
-        "cluster_id": "c1", "profile_key": "mtp3-spark", "label": "smoke",
+        "cluster_id": "c1", "profile_key": "tp4-mtp3", "label": "smoke",
         "args": {"concurrency": "1,2", "contexts": "0", "max_tokens": 128,
                  "duration": 8, "prefill_contexts": "8k"}})
     assert r.status_code == 200, r.text
@@ -116,8 +118,8 @@ async def test_rest(client: httpx.AsyncClient) -> list[str]:
     r = await client.post(f"{BASE}/api/llm/c1/chat", json={"messages": [{"role": "user", "content": "hi"}]}, timeout=20)
     notes.append(f"chat SSE status={r.status_code} (non-crash required)")
     envs = (await client.get(f"{BASE}/api/images/envs/c1")).json()
-    assert envs["envs"][0]["clusters"][0]["image"], envs
-    notes.append("images/envs: SERVING_IMAGE read from live host env files")
+    assert isinstance(envs.get("envs"), list)  # ring has no env files; empty is valid
+    notes.append(f"images/envs ring: {len(envs.get('envs', []))} rows (env-file free by design)")
     imgs = (await client.get(f"{BASE}/api/images/c1-n0")).json()
     assert len(imgs["images"]) >= 2, imgs
     notes.append(f"images list: {len(imgs['images'])} local/vllm rows")

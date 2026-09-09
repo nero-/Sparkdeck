@@ -23,6 +23,7 @@ from ..db import DB, jdumps, jloads, now_ms
 from ..models import OpRecord, OpStep
 from ..ssh.pool import ExecResult, NodeUnreachable
 from ..ssh.sudo import NoSudo, SUDO, sudo_run
+from .sparkring import SparkringVerbs, extract_receipt_path, parse_liveness
 from .tp2 import Tp2Verbs, gid_check_script
 
 Notify = Callable[[OpRecord, list[tuple[str, str]]], None]  # (record, appended log lines)
@@ -32,12 +33,14 @@ class OpContext:
     """Everything a verb needs: settings, runtimes, events, kv capture."""
 
     def __init__(self, *, cluster: dict, nodes: dict[str, dict],
-                 runtime_of: Callable[[str], Any], alert_engine, hub) -> None:
+                 runtime_of: Callable[[str], Any], alert_engine, hub,
+                 console_runtime: Any | None = None) -> None:
         self.cluster = cluster
         self.nodes = nodes  # id → node dict
         self.runtime_of = runtime_of
         self.alerts = alert_engine
         self.hub = hub
+        self.console_runtime = console_runtime  # LocalRuntime / mock console
 
 
 class OperationError(Exception):
@@ -80,6 +83,16 @@ class OpEngine:
 
     def verbs_for(self, ctx: OpContext, node: dict) -> Tp2Verbs:
         return Tp2Verbs(ctx.cluster["control"], node)
+
+    def ring(self, ctx: OpContext) -> SparkringVerbs | None:
+        launcher = (ctx.cluster.get("control") or {}).get("launcher") or ""
+        return SparkringVerbs(ctx.cluster["control"]) if "sparkring" in launcher.lower() else None
+
+    def console_rt(self, ctx: OpContext):
+        rt = getattr(ctx, "console_runtime", None)
+        if rt is None:
+            raise OperationError("cluster console runtime is not available")
+        return rt
 
     def profile(self, ctx: OpContext, profile_key: str | None) -> dict | None:
         if not profile_key:
@@ -218,6 +231,10 @@ class OpEngine:
 
     # -- cluster.start --
     async def _op_cluster_start(self, op: OpRecord, ctx: OpContext) -> None:
+        ring = self.ring(ctx)
+        if ring is not None:
+            await self._op_cluster_start_ring(op, ctx, ring)
+            return
         params = op.params
         profile_key = op.profile_key or ""
         self.profile(ctx, profile_key)
@@ -351,6 +368,10 @@ class OpEngine:
 
     # -- cluster.stop --
     async def _op_cluster_stop(self, op: OpRecord, ctx: OpContext) -> None:
+        ring = self.ring(ctx)
+        if ring is not None:
+            await self._op_cluster_stop_ring(op, ctx, ring)
+            return
         head, worker = self.head_node(ctx), self.worker_node(ctx)
         rt_h, rt_w = self.runtime(ctx, head), self.runtime(ctx, worker)
         profile_key = op.profile_key or None
@@ -377,6 +398,10 @@ class OpEngine:
 
     # -- cluster.preflight --
     async def _op_cluster_preflight(self, op: OpRecord, ctx: OpContext) -> None:
+        ring = self.ring(ctx)
+        if ring is not None:
+            await self._op_cluster_preflight_ring(op, ctx, ring)
+            return
         head, worker = self.head_node(ctx), self.worker_node(ctx)
         op.steps = [OpStep(name=n) for n in ("preflight worker", "preflight head")]
         for idx, node in ((0, worker), (1, head)):
@@ -394,7 +419,11 @@ class OpEngine:
 
     # -- cluster.check / cluster.verify --
     async def _op_cluster_check(self, op: OpRecord, ctx: OpContext) -> None:
-        profile_key = op.profile_key or (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else "mtp3-spark")
+        ring = self.ring(ctx)
+        if ring is not None:
+            await self._op_cluster_check_ring(op, ctx, ring)
+            return
+        profile_key = op.profile_key or (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else "tp4-mtp3"))
         self.profile(ctx, profile_key)
         for node in (self.head_node(ctx), self.worker_node(ctx)):
             rt = self.runtime(ctx, node)
@@ -406,6 +435,10 @@ class OpEngine:
                 op.message = f"check reported exit {res.exit} on {node['name']} (see log)"
 
     async def _op_cluster_verify(self, op: OpRecord, ctx: OpContext) -> None:
+        ring = self.ring(ctx)
+        if ring is not None:
+            await self._op_cluster_verify_ring(op, ctx, ring)
+            return
         profile_key = self.profile_str(op, ctx)
         head = self.head_node(ctx)
         rt = self.runtime(ctx, head)
@@ -415,9 +448,191 @@ class OpEngine:
         if res.exit not in (0, None):
             op.message = f"verify exited {res.exit}"
 
+
+    # ================== SparkRing (managed mesh) cluster ops ==================
+    # The TP4 ring lifecycle runs through the operator's sparkring.sh console
+    # ON THE CONTROLLER (LocalRuntime) — plan → apply → receipt per verb.
+    # OPERATIONS invariant honored: never touch containers/routing directly.
+
+    def _cancelled(self, op: OpRecord):
+        return lambda: op.state == "cancelled"
+
+    def _head_probe_runtime(self, op: OpRecord, ctx: OpContext):
+        head = self.head_node(ctx)
+        rt = self.runtime(ctx, head)
+        port = int(head.get("api_port") or 8015)
+        return head, rt, port
+
+    async def _ring_url_probe(self, op: OpRecord, ctx: OpContext, path: str, port: int,
+                              timeout: float = 12.0) -> tuple[bool, str]:
+        """Reachability + payload probe. Success = curl exit 0 AND non-empty
+        body (works for both the real node shell and the mock exec path)."""
+        _head, rt, _ = self._head_probe_runtime(op, ctx)
+        cmd = f'curl -s -m 8 http://127.0.0.1:{port}{path} 2>/dev/null'
+        res = await self._run_on(op, rt, cmd, timeout=timeout)
+        body = (res.stdout or "").strip()
+        return (res.exit in (0, None)) and body != "", body
+
+    @staticmethod
+    def _head_alias(head: dict) -> str:
+        return head.get("ssh_alias") or head.get("name") or "gx10-r0"
+
+    async def _op_cluster_start_ring(self, op: OpRecord, ctx: OpContext, ring: SparkringVerbs) -> None:
+        control = ctx.cluster["control"]
+        params = op.params
+        profile_key = op.profile_key or (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else "")
+        self.profile(ctx, profile_key)
+        timeout_s = int(params.get("health_timeout_s") or control.get("health_timeout_s") or 2700)
+        op.steps = [OpStep(name=n) for n in ("console: start (plan→apply→ready)",
+                                             "endpoint probe (/v1/models)", "liveness",
+                                             "capture KV + image")]
+        crt = self.console_rt(ctx)
+        self.livestep_line(op, f"sparkring start via {ring.serve_dir} (console runs on this host)")
+
+        self.step(op, 0, "running")
+        try:
+            rc = await self.stream_into(op, crt, ring.console("start"), timeout=float(timeout_s))
+        except OperationError:
+            raise
+        except Exception as exc:
+            self.step(op, 0, "error", detail=str(exc)[:140])
+            raise OperationError(f"console start failed: {exc}")
+        if rc not in (0, None):
+            self.step(op, 0, "error", detail=f"console exit {rc}")
+            raise OperationError("./sparkring.sh start failed (see log/receipt)")
+        self.step(op, 0, "ok")
+
+        self.step(op, 1, "running")
+        head, rt, port = self._head_probe_runtime(op, ctx)
+        t0 = time.time()
+        deadline = t0 + min(600.0, max(120.0, timeout_s * 0.5))
+        models_ok = False
+        while time.time() < deadline:
+            if op.state == "cancelled":
+                raise OperationError("cancelled", fatal=False)
+            ok, body = await self._ring_url_probe(op, ctx, "/v1/models", port)
+            if ok:
+                self.livestep_line(op, f"/v1/models alive after {int(time.time()-t0)}s: {body[:120]}")
+                models_ok = True
+                break
+            await asyncio.sleep(5)
+        if not models_ok:
+            self.step(op, 1, "error", detail="no 200 from /v1/models")
+            raise OperationError("endpoint probe failed (see ./sparkring.sh liveness)")
+        self.step(op, 1, "ok")
+
+        self.step(op, 2, "running")
+        lv = {}
+        try:
+            lv_res = await self._run_on(op, rt,
+                f'curl -s -m 6 http://127.0.0.1:{port + 1}/liveness || true', timeout=15)
+            lv = parse_liveness(lv_res.stdout or "")
+        except Exception as exc:
+            self.livestep_line(op, f"liveness fetch failed: {exc}")
+        if lv:
+            self.livestep_line(op, f"liveness: {lv}")
+        else:
+            self.livestep_line(op, "liveness endpoint not reachable from the head node (non-fatal)")
+        self.step(op, 2, "ok")
+
+        self.step(op, 3, "running")
+        kv_tokens = None
+        for prof in ctx.cluster["profiles"]:
+            if prof["key"] == profile_key:
+                kv_tokens = prof.get("kv_tokens")
+        if kv_tokens and ctx.hub is not None:
+            ctx.hub.note_kv_tokens(ctx.cluster["id"], profile_key, int(kv_tokens))
+            self.livestep_line(op, f"KV pool (design): {int(kv_tokens):,} tokens")
+        try:
+            img = await self._run_on(op, rt,
+                "docker inspect glm-tp4-r0 --format '{{.Image}}' 2>&1", timeout=15)
+            self.livestep_line(op, f"r0 image: {img.stdout.strip()[:20]}")
+        except Exception:
+            pass
+        self.step(op, 3, "ok" if kv_tokens else "skipped", detail=f"{kv_tokens}" if kv_tokens else None)
+
+    async def _op_cluster_stop_ring(self, op: OpRecord, ctx: OpContext, ring: SparkringVerbs) -> None:
+        params = op.params
+        mode = params.get("mode") or "stop"  # stop: model off, mesh stays; down: full teardown
+        if mode not in ("stop", "down"):
+            raise OperationError(f"unknown stop mode {mode!r} (stop|down)")
+        op.steps = [OpStep(name=f"console: {mode}"), OpStep(name="confirm quiet")]
+        crt = self.console_rt(ctx)
+        self.step(op, 0, "running")
+        rc = await self.stream_into(op, crt, ring.console(mode), timeout=900.0)
+        if rc not in (0, None):
+            self.step(op, 0, "error", detail=f"console exit {rc}")
+            raise OperationError(f"./sparkring.sh {mode} failed (see log/receipt)")
+        self.step(op, 0, "ok")
+        self.step(op, 1, "running")
+        await asyncio.sleep(2)
+        head, rt, port = self._head_probe_runtime(op, ctx)
+        still_up, _ = await self._ring_url_probe(op, ctx, "/health", port)
+        health = "answered" if still_up else "no answer"
+        if mode == "down" and still_up:
+            self.step(op, 1, "error", detail="API still answering after down")
+            raise OperationError("API still answering after ./sparkring.sh down")
+        self.livestep_line(op, f"API /health → {health} (mesh supervisors "
+                               f"{'stopped' if mode == 'down' else 'still running — up/start'} )".replace(" )", ")"))
+        self.step(op, 1, "ok")
+
+    async def _op_cluster_preflight_ring(self, op: OpRecord, ctx: OpContext, ring: SparkringVerbs) -> None:
+        op.steps = [OpStep(name="doctor --verify (on r0)"), OpStep(name="nodes reachable")]
+        crt = self.console_rt(ctx)
+        head = self.head_node(ctx)
+        self.step(op, 0, "running")
+        res = await self._run_on(op, crt, ring.doctor_verify(self._head_alias(head)), timeout=240.0)
+        for ln in res.stdout.strip().splitlines()[-40:]:
+            self.livestep_line(op, ln)
+        ok = res.exit in (0, None)
+        self.step(op, 0, "ok" if ok else "error",
+                  detail=None if ok else "doctor reported failures (see log)")
+        if not ok:
+            raise OperationError("sparkring doctor --verify failed on r0")
+        self.step(op, 1, "running")
+        for node in ctx.nodes.values():
+            rt = self.runtime(ctx, node)
+            probe = await self._run_on(op, rt, "echo ok && docker ps --format '{{.Names}}' | head -6", timeout=20)
+            self.livestep_line(op, f"{node['name']}: {', '.join(probe.stdout.strip().splitlines()[:6])}")
+            if probe.exit != 0:
+                raise OperationError(f"{node['name']} unreachable for preflight")
+        self.step(op, 1, "ok")
+
+    async def _op_cluster_check_ring(self, op: OpRecord, ctx: OpContext, ring: SparkringVerbs) -> None:
+        op.steps = [OpStep(name="native-check (4-rank comm)"), OpStep(name="liveness")]
+        crt = self.console_rt(ctx)
+        self.step(op, 0, "running")
+        rc = await self.stream_into(op, crt, ring.native_check(), timeout=900.0)
+        if rc not in (0, None):
+            op.message = f"native-check exited {rc} (see log)"
+        self.step(op, 0, "ok" if rc in (0, None) else "error")
+        self.step(op, 1, "running")
+        head, rt, port = self._head_probe_runtime(op, ctx)
+        health_ok, _ = await self._ring_url_probe(op, ctx, "/health", port)
+        lv_res = await self._run_on(op, rt, f'curl -s -m 6 http://127.0.0.1:{port + 1}/liveness || true', timeout=12)
+        lv = parse_liveness(lv_res.stdout or "")
+        self.livestep_line(op, f"/health → {'answered' if health_ok else 'no answer'} · liveness: {lv or {}}")
+        self.step(op, 1, "ok")
+
+    async def _op_cluster_verify_ring(self, op: OpRecord, ctx: OpContext, ring: SparkringVerbs) -> None:
+        op.steps = [OpStep(name="console: ready"), OpStep(name="endpoint verify")]
+        crt = self.console_rt(ctx)
+        self.step(op, 0, "running")
+        rc = await self.stream_into(op, crt, ring.ready(), timeout=600.0)
+        if rc not in (0, None):
+            self.step(op, 0, "error", detail=f"console exit {rc}")
+            raise OperationError(f"./sparkring.sh ready failed (exit {rc})")
+        self.step(op, 0, "ok")
+        self.step(op, 1, "running")
+        port = int((ctx.nodes.get(ctx.cluster["control"].get("head_node_id")) or {}).get("api_port") or 8015)
+        ok, body = await self._ring_url_probe(op, ctx, "/v1/models", port)
+        self.livestep_line(op, f"/v1/models → {body[:160]}")
+        self.step(op, 1, "ok" if ok else "error",
+                  detail=None if ok else "endpoint did not answer")
+
     def profile_str(self, op: OpRecord, ctx: OpContext) -> str:
         k = op.profile_key or ""
-        return k or (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else "mtp3-spark")
+        return k or (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else (ctx.cluster["profiles"][0]["key"] if ctx.cluster["profiles"] else "tp4-mtp3"))
 
     # ---------------- node ops ----------------
     async def _op_node_show_gids(self, op: OpRecord, ctx: OpContext) -> None:

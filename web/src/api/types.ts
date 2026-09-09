@@ -53,6 +53,8 @@ export interface ProfileDef {
   mm_images?: number | null;
   mm_videos?: number | null;
   notes?: string | null;
+  /** design KV capacity in tokens (SparkRing TP4: ~2.28 M cluster-wide) */
+  kv_tokens?: number | null;
 }
 
 export type ClusterKind = 'tp2';
@@ -89,8 +91,8 @@ export interface AppSettings {
     decaminute_days: number;          // 10m rollups (default 60)
   };
   alerts: {
-    mem_warn_gib: number;             // 118.5 default
-    mem_crit_gib: number;             // 120.5 default
+    mem_warn_pct: number;             // % of node unified-memory total (95 default)
+    mem_crit_pct: number;             // % of total (98 default)
     gpu_temp_warn_c: number;
     gpu_temp_crit_c: number;
     container_restarts: number;       // alert at N restarts per hour
@@ -133,6 +135,16 @@ export interface LiveNodeState {
   last_sample_ts: EpochMs | null;
 }
 
+export interface ServiceLiveness {
+  healthy?: boolean;
+  running_requests?: number;
+  kv_cache_usage?: number;        // fraction 0..1
+  blocked_seconds?: number;
+  output_stalled_seconds?: number;
+  model?: string;
+  version?: string;
+}
+
 export interface ServiceState {
   cluster_id: ID;
   health: ServiceHealth;
@@ -146,6 +158,7 @@ export interface ServiceState {
   kv_tokens: number | null;
   metrics: Record<string, number>;  // curated, see docs/API.md
   errors: string[];
+  liveness?: ServiceLiveness | null;  // TP4 ring :8016 snapshot
 }
 
 export interface SampleFrame {

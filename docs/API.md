@@ -51,7 +51,7 @@ Control verbs (all return `{op_id}` and stream via ws topic `ops`):
 | Method | Path | Body |
 |---|---|---|
 | POST | `/api/clusters/{id}/actions/start` | `{profile_key, health_timeout_s?, skip_preflight?, extra?}` |
-| POST | `/api/clusters/{id}/actions/stop` | `{force?}` |
+| POST | `/api/clusters/{id}/actions/stop` | `{force?, mode?}` — mode: `stop` (default, mesh stays) or `down` (full teardown; ring clusters) |
 | POST | `/api/clusters/{id}/actions/preflight` | `{}` |
 | POST | `/api/clusters/{id}/actions/check` | `{profile_key?}` |
 | POST | `/api/clusters/{id}/actions/verify` | `{profile_key}` |

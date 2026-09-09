@@ -67,6 +67,8 @@ function wsDotState(status: string): 'ok' | 'degraded' | 'offline' | 'unknown' {
    Page
    ========================================================================== */
 
+import { BenchMini, EngineMini, RingStateMini } from './OverviewExtras';
+
 export default function OverviewPage() {
   const clustersQ = useClusters();
   const infoQ = useSystemInfo();
@@ -156,8 +158,19 @@ export default function OverviewPage() {
       )}
 
       <div className="sd-card-gap mt-6 grid min-w-0 grid-cols-1 lg:grid-cols-3">
+        {clusters.map((c) => (
+          <div key={c.id} className={clusters.length === 1 ? 'min-w-0 lg:col-span-2' : 'min-w-0'}>
+            <EngineMini cluster={c} service={services[c.id]} />
+          </div>
+        ))}
+        <BenchMini />
+      </div>
+
+      <div className="sd-card-gap grid min-w-0 grid-cols-1 lg:grid-cols-3">
+        {clusters.map((c) => (
+          <RingStateMini key={`rs-${c.id}`} cluster={c} service={services[c.id]} />
+        ))}
         <Panel
-          className="lg:col-span-2"
           title="Recent events"
           sub="live + persisted feed"
           actions={
@@ -483,9 +496,26 @@ function shortTag(image: string): string {
   return name.length > 34 ? `${name.slice(0, 33)}…` : name;
 }
 
+/** The cluster is ring-managed (sparkring.sh) or a legacy TP2 env-file pair,
+    depending on the launcher configured in Settings ▸ Clusters. */
+function isRingControl(cluster: ClusterTopology): boolean {
+  return (cluster.control.launcher || '').toLowerCase().includes('sparkring');
+}
+
 function startCommands(cluster: ClusterTopology, p: ProfileDef | null): string[] {
+  const { serve_dir, launcher } = cluster.control;
+  if (isRingControl(cluster)) {
+    // managed-mesh flow: console runs on the controller host and waits for
+    // readiness itself (plan → apply → receipt)
+    return [
+      `# on the controller host — ${serve_dir}`,
+      `./${launcher} up               # mesh supervisors (no model)`,
+      `./${launcher} start            # model + automatic readiness wait`,
+      `# model: ${p?.served_model_name ?? 'glm-5.3-flash-spark'} · API :8015 · liveness :8016 (head)`,
+    ];
+  }
   if (p === null) return [];
-  const { serve_dir, launcher, start_extra } = cluster.control;
+  const { start_extra } = cluster.control;
   const lines: string[] = [];
   for (const n of cluster.nodes) {
     lines.push(
@@ -497,6 +527,14 @@ function startCommands(cluster: ClusterTopology, p: ProfileDef | null): string[]
 }
 
 function stopCommands(cluster: ClusterTopology): string[] {
+  if (isRingControl(cluster)) {
+    return [
+      `# stop: model off, mesh supervisors stay`,
+      `./${cluster.control.launcher} stop`,
+      `# down: model AND mesh (use before node reboots)`,
+      `./${cluster.control.launcher} down   # only when you want the full teardown`,
+    ];
+  }
   return [`bash ${cluster.control.launcher} --down   # head then worker — both ranks stop`];
 }
 

@@ -85,17 +85,17 @@ const HZ_WARN = '#FBBF24';
 const HZ_CRIT = '#F87171';
 
 interface AppAlerts {
-  mem_warn_gib: number;
-  mem_crit_gib: number;
+  mem_warn_pct: number;
+  mem_crit_pct: number;
   gpu_temp_warn_c: number;
   gpu_temp_crit_c: number;
 }
 
 const ALERT_DEFAULTS: AppAlerts = {
-  mem_warn_gib: 118.5,
-  mem_crit_gib: 120.5,
-  gpu_temp_warn_c: 85,
-  gpu_temp_crit_c: 95,
+  mem_warn_pct: 95,
+  mem_crit_pct: 98,
+  gpu_temp_warn_c: 86,
+  gpu_temp_crit_c: 94,
 };
 
 /** Build the default chart layout from the latest sample frame. Dynamic ids
@@ -267,26 +267,24 @@ function buildLayout(sample: SampleFrame | undefined, isHead: boolean): TileDef[
   return tiles;
 }
 
-/** Wire the settings-driven alert horizons onto the memory tile. */
-function withMemHorizons(tiles: TileDef[], alerts: AppAlerts): TileDef[] {
+/** Wire the settings-driven alert horizons onto the memory tile. Thresholds
+    are percent-of-total now; the horizon lines land at pct × total GiB. */
+function withMemHorizons(tiles: TileDef[], alerts: AppAlerts, totalGib: number | null): TileDef[] {
+  const total = totalGib ?? 0;
+  const warn = total > 0 ? (total * alerts.mem_warn_pct) / 100 : null;
+  const crit = total > 0 ? (total * alerts.mem_crit_pct) / 100 : null;
   return tiles.map((t) =>
     t.id !== 'mem'
       ? t
       : {
           ...t,
           horizons: [
-            {
-              id: 'hz.warn',
-              label: `warn ${alerts.mem_warn_gib} GiB`,
-              color: HZ_WARN,
-              value: alerts.mem_warn_gib,
-            },
-            {
-              id: 'hz.crit',
-              label: `crit ${alerts.mem_crit_gib} GiB`,
-              color: HZ_CRIT,
-              value: alerts.mem_crit_gib,
-            },
+            ...(warn !== null
+              ? [{ id: 'hz.warn', label: `warn ${alerts.mem_warn_pct}% (${warn.toFixed(1)} GiB)`, color: HZ_WARN, value: warn }]
+              : []),
+            ...(crit !== null
+              ? [{ id: 'hz.crit', label: `crit ${alerts.mem_crit_pct}% (${crit.toFixed(1)} GiB)`, color: HZ_CRIT, value: crit }]
+              : []),
           ],
         },
   );
@@ -381,9 +379,14 @@ function NodeDashboard({
   const [window, setWindow] = useState<HistWindow>('5m');
   const age = useSampleAge(live?.last_sample_ts ?? sample?.ts ?? null);
 
+  const memTotal = useMemo(() => {
+    const v = sample?.series['mem.total_gib'];
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  }, [sample]);
+
   const tiles = useMemo(
-    () => withMemHorizons(buildLayout(sample, isHead), alertsv),
-    [sample, isHead, alertsv],
+    () => withMemHorizons(buildLayout(sample, isHead), alertsv, memTotal),
+    [sample, isHead, alertsv, memTotal],
   );
 
   const allNames = useMemo(() => tiles.flatMap((t) => t.series.map((x) => x.id)), [tiles]);

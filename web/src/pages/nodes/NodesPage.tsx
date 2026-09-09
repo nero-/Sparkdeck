@@ -115,7 +115,7 @@ export default function NodesPage() {
           ))}
         </div>
         <span className="ml-auto font-mono text-2xs text-low" title="alerts thresholds come from GET /api/settings">
-          mem warn/crit {settingsQ.data ? `${settingsQ.data.alerts.mem_warn_gib}/${settingsQ.data.alerts.mem_crit_gib} GiB` : '…'}
+          mem warn/crit {settingsQ.data ? `${settingsQ.data.alerts.mem_warn_pct}% / ${settingsQ.data.alerts.mem_crit_pct}% of total` : '…'}
         </span>
       </Panel>
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import math
 import random
 import time
@@ -18,8 +19,13 @@ from typing import Any
 from ..ssh.pool import ExecResult
 
 MOCK_SPEED = 12.0  # boot 200s → ~17s
-MODEL = "zai-org/GLM-5.3-Flash"
-IMAGE = "local/vllm:glm53-flash-nvfp4-head0906-managed"
+MODEL = "glm-5.3-flash-spark"          # SparkRing TP4 served model id
+RING_IMAGE = "ghcr.io/fujitsupolycom/sparkring@sha256:35db0557e1b2c4d9"
+LEGACY_IMAGE = "local/vllm:glm53-flash-nvfp4-head0906-managed"
+API_PORT = 8015
+LIVE_PORT = 8016
+CONTAINER = "glm-tp4-r{rank}"
+NODE_TOTAL_GIB = 127.9
 
 
 def now_ms() -> int:
@@ -27,25 +33,32 @@ def now_ms() -> int:
 
 
 class ClusterLifecycle:
-    def __init__(self, cluster_id: str, kv_tokens: int = 1466929) -> None:
+    """Simulated state of the 4-rank ring: two independently tracked layers —
+    mesh supervisors (up/down) and the model (none/booting/serving)."""
+
+    def __init__(self, cluster_id: str, kv_tokens: int = 2_278_454) -> None:
         self.cluster_id = cluster_id
         self.profile: str | None = None
         self.boot_at: float = 0.0
         self.healthy_at: float = 0.0
         self.kv_tokens = kv_tokens
-        self.image = IMAGE
-        self.cpu_load_bias = 0.0   # drifting slow ramps for realism
+        self.image = RING_IMAGE
+        self.mesh: str = "down"          # down | up
+        self.cpu_load_bias = 0.0
         self.seed = random.Random(cluster_id)
 
     def boot(self, profile: str) -> None:
         self.profile = profile
         self.boot_at = time.time()
         self.healthy_at = 0.0
+        self.mesh = "up"
 
-    def stop(self) -> None:
+    def stop(self, model_only: bool = False) -> None:
         self.profile = None
         self.boot_at = 0.0
         self.healthy_at = 0.0
+        if not model_only:
+            self.mesh = "down"
 
     @property
     def boot_elapsed(self) -> float:
@@ -70,12 +83,118 @@ class MockWorld:
     def __init__(self) -> None:
         self.clusters: dict[str, ClusterLifecycle] = {
             "c1": ClusterLifecycle("c1"),
-            "c2": ClusterLifecycle("c2"),
         }
         self.runtimes: dict[str, "MockRuntime"] = {}
         self.on_state: Any = None
         self.on_sample: Any = None
         self._frames_tasks: list[asyncio.Task] = []
+
+    async def console_verb(self, verb: str, on_line=None) -> int:
+        """sparkring.sh <verb>: plan/apply/receipt-shaped output + state changes.
+        Matches the console's flow: plan → apply → receipt echo."""
+        def says(*lines):
+            if on_line:
+                for ln in lines:
+                    on_line(ln)
+
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        lc = self.clusters.get("c1")
+        if verb in ("up", "start", "ready", "stop", "down", "recover", "native-check"):
+            says(f"==> planning: {verb}")
+            says(f"==> applying:  {verb} (sha256 a1b2c3d4e5f6...)")
+            receipt = f".private/glm-tp4-deployment/{verb}-{stamp}.json-receipt.json"
+        else:
+            receipt = None
+        if verb == "up":
+            if lc is not None and lc.profile is None and not lc.healthy():
+                lc.mesh = "up"
+            says("**→ mesh supervisors up** - see /opt/sparkring/managed-mesh")
+            says("complete=True actions_ok=True")
+            says(f"  complete=True actions_ok=True")
+            for i in range(4):
+                says(f"  [status:glm-tp4-r{i}] state=succeeded rc=0 (0.4s)")
+            if receipt:
+                says(receipt)
+            return 0
+        if verb == "start":
+            self.boot_cluster("c1", "tp4-mtp3")
+            says("==> waiting for readiness (all 4 containers + API/liveness)...")
+            return 0
+        if verb == "ready":
+            lc = self.clusters.get("c1")
+            if lc is None:
+                says("error: no cluster")
+                return 1
+            wait_s = 0.0
+            while not lc.healthy() and wait_s < 40:
+                if on_line:
+                    on_line(f"waiting: model booting ({int(lc.boot_elapsed)}s engine-time)…")
+                await asyncio.sleep(0.9)
+                wait_s += 0.9
+            healthy = lc.healthy()
+            rc = 0 if healthy else 1
+            says("complete=True actions_ok=True" if healthy else
+                 "complete=False actions_ok=False (model not ready — ./sparkring.sh logs)")
+            for i in range(4):
+                says(f"  [ready:glm-tp4-r{i}] state=succeeded rc=0 (0.3s)")
+            if healthy:
+                says("==> model ready: http://192.168.50.23:8015/v1/models")
+                says(json.dumps({"object": "list", "data": [{"id": MODEL}]}))
+            if receipt:
+                says(receipt)
+            return rc
+        if verb in ("stop", "down"):
+            if lc is not None:
+                lc.stop(model_only=(verb == "stop"))
+            says("Model stopped (mesh supervisors still running)." if verb == "stop"
+                 else "Model and mesh stopped; supervisors not restarted.")
+            says("complete=True actions_ok=True")
+            for i in range(4):
+                says(f"  [{verb}:glm-tp4-r{i}] state=succeeded rc=0 (0.5s)")
+            if receipt:
+                says(receipt)
+            return 0
+        if verb == "recover":
+            if lc is not None:
+                lc.mesh = "up"
+            says("Mesh reset and supervisors restarted; model NOT started. Run: start")
+            says("complete=True actions_ok=True")
+            if receipt:
+                says(receipt)
+            return 0
+        if verb == "status":
+            if lc is not None:
+                for i in range(4):
+                    if lc.profile or lc.healthy():
+                        says(f"  status:glm-tp4-r{i}: running health=healthy oom=False "
+                             f"restarts_policy=unless-stopped")
+                    else:
+                        says(f"  status:glm-tp4-r{i}: exited rc=0")
+            if receipt:
+                says(receipt)
+            return 0
+        if verb == "logs":
+            for i in range(4):
+                says(f"===== status:glm-tp4-r{i} =====")
+                for ln in list(vllm_log_lines(i))[-6:]:
+                    says(ln)
+            return 0
+        if verb == "native-check":
+            for i in range(4):
+                says(f"PASS rank{i} fabric p0/p1 GID3 MTU4096 latency 0.10-0.14 ms")
+            says("4-rank native communication checks: ALL PASS")
+            return 0
+        if verb == "liveness":
+            import urllib.request as _ur  # mock never hits the network
+            says("==> api health: http://192.168.50.23:8015/health")
+            healthy = bool(lc and lc.healthy())
+            says(f"   HTTP {'200' if healthy else '000'}")
+            says(f"==> liveness: {{'healthy': {'true' if healthy else 'false'}, "
+                 f"'running_requests': {lc.seed.randint(0, 6) if healthy else 0}}}")
+            return 0
+        if receipt:
+            says(receipt)
+        return 0
 
     def attach_runtime(self, node_id: str, rt: "MockRuntime") -> None:
         self.runtimes[node_id] = rt
@@ -150,14 +269,16 @@ def build_frame(world: "MockWorld", node: dict, env_rank: int, head: bool) -> di
     power = 4.5 + (gpu_util / 99.0) * 30 + random.uniform(-0.2, 0.2)
     clock_sm = 1725 if gpu_util > 15 else 1450
 
-    mem_total = 121.7
+    mem_total = NODE_TOTAL_GIB  # 128 GiB unified per GB10 (SparkRing TP4)
     if serving:
-        mem_used = 118.2 + min(1.1, lc.uptime_s / 900) + random.uniform(-0.2, 0.2)
+        # ~40 GiB weights + 24 GiB KV/fp8 + graphs/JIT + pagecache drift;
+        # drifts toward ~112 GiB, never into the 95 % alert line
+        mem_used = 68.0 + min(24.0, lc.uptime_s / 240) + random.uniform(-0.6, 0.6)
     elif booting:
         progress = min(1.0, lc.boot_elapsed / 160)
-        mem_used = 9.0 + progress * (117.5 - 9.0) + random.uniform(-0.4, 0.4)
+        mem_used = 12.0 + progress * (78.0 - 12.0) + random.uniform(-0.8, 0.8)
     else:
-        mem_used = 7.2 + _sine(t, 300, 1.2) + random.uniform(-0.15, 0.15)
+        mem_used = 9.5 + _sine(t, 300, 1.2) + random.uniform(-0.3, 0.3)
     gpu_frame = {
         "util": round(gpu_util, 1),
         "temp": round(gpu_temp, 1),
@@ -199,12 +320,12 @@ def build_frame(world: "MockWorld", node: dict, env_rank: int, head: bool) -> di
         "tz12-mlx5": round(44 + _sine(t, 300, 2, phase=1), 1),
     }
     temp_frame = {"zones": zones, "max": max(zones.values()) if zones else None}
-    psi_frame = {"memory": round(max(0.0, 0.002 + (0.02 if mem_used > 120.3 else 0.0)), 4),
+    psi_frame = {"memory": round(max(0.0, 0.002 + (0.02 if mem_used > 0.97 * mem_total else 0.0)), 4),
                  "io": round(0.001 + abs(load_wave) * 0.0001, 4)}
 
     containers: dict[str, dict] = {}
     if lc.profile or serving:
-        name = f"glm53-flash-r{env_rank}"
+        name = CONTAINER.format(rank=env_rank)  # glm-tp4-rN — one per node
         containers[name] = {
             "cpu_pct": round(120 + gpu_util * (1 + env_rank * 0.04) * 3.4 + random.uniform(-8, 8), 1),
             "mem_gib": round(mem_used - 8.0, 2),
@@ -212,26 +333,33 @@ def build_frame(world: "MockWorld", node: dict, env_rank: int, head: bool) -> di
             "tx_kbps": round(rx * 0.86, 1),
         }
 
-    vllm_frame: dict = {"ts": ts, "health": "up" if serving else "down", "port": 8000,
-                        "models": [MODEL] if serving else [], "g": {}}
-    if serving:
+    # The API + liveness live on the head rank only (r0, :8015 / :8016);
+    # member ranks carry no vllm block at all (parser ignores them)
+    if env_rank != 0:
+        vllm_frame: dict = {}
+    else:
+        vllm_frame: dict = {"ts": ts, "health": "up" if serving else ("booting" if booting else "down"),
+                            "port": API_PORT, "models": [MODEL] if serving else [], "g": {}}
+    if serving and env_rank == 0:
         burst = (_sine(t, 95, 0.75, base=0.25) > 0.75) or (lc.seed.random() < 0.06)
-        tokens_out = (34 + load_wave * 1.7 + random.uniform(-3, 4)) if burst else 0.4 + random.uniform(0, 1.5)
+        tokens_out = (52 + load_wave * 1.9 + random.uniform(-3, 4)) if burst else 0.4 + random.uniform(0, 1.5)
         decode = round(max(0.0, tokens_out), 1)
-        kv_usage = min(96.0, 22 + abs(load_wave) * 1.6 + (18 if burst else 0))
+        kv_usage = min(92.0, 18 + abs(load_wave) * 1.4 + (16 if burst else 0))
         g = {
             "decode_tok_s": decode,
-            "prompt_tok_s": round(1500 + (2100 if burst else 0) + random.uniform(-60, 60), 1) if burst else round(random.uniform(0, 400), 1),
-            "num_running": int(1 + max(0, (serving and burst) * 7 + random.randint(0, 6)) if burst else random.randint(0, 1)),
-            "num_waiting": random.randint(0, 4) if burst else 0,
+            "prompt_tok_s": round(3400 + (2600 if burst else 0) + random.uniform(-80, 80), 1) if burst else round(random.uniform(0, 700), 1),
+            "num_running": (2 + random.randint(0, 5)) if burst else random.randint(0, 1),
+            "num_waiting": random.randint(0, 6) if burst else 0,
             "kv_usage": round(kv_usage, 1),
             "prefix_hit_rate": round(38 + abs(load_wave) * 0.5, 1),
-            "ttft_ms_avg": round(310 + (1640 if burst else 0) + random.uniform(-40, 60), 1),
-            "ttft_ms_p50": round(280 + (1500 if burst else 0), 1),
-            "ttft_ms_p95": round(560 + (4200 if burst else 0), 1),
-            "tpot_ms_avg": round(27 - min(4, tokens_out / 40) + random.uniform(-1.5, 1.5), 1),
-            "spec_accept": round(2.31 + _sine(t, 140, 0.22) + random.uniform(-0.1, 0.1), 3),
-            "preemptions": float(3 + int((t // 900) % 5)) if env_rank == 0 else 0,
+            "ttft_ms_avg": round(240 + (1500 if burst else 0) + random.uniform(-40, 60), 1),
+            "ttft_ms_p50": round(210 + (1400 if burst else 0), 1),
+            "ttft_ms_p95": round(640 + (4300 if burst else 0), 1),
+            "tpot_ms_avg": round(17 - min(3, tokens_out / 60) + random.uniform(-1.2, 1.2), 1),
+            "spec_accept": round(2.38 + _sine(t, 140, 0.2) + random.uniform(-0.08, 0.08), 3),
+            "preemptions": float(1 + int((t // 1200) % 3)),
+            "blocked_seconds": round(random.uniform(0.0, 3.0) if burst else 0.0, 2),
+            "output_stalled_seconds": 0.0,
         }
         vllm_frame["g"] = g
         vllm_frame["model"] = MODEL
@@ -393,7 +521,7 @@ def _key_of(env: str) -> str:
     e = env.lower()
     if "df" in e or "dflash" in e:
         return "df-spark" if "spark" in e else "df-nvfp4"
-    return "mtp3-spark" if "spark" in e else "mtp3-nvfp4"
+    return "tp4-mtp3"  # ring mock boot key (tp2 legacy verbs keep theirs)
 
 
 def _drain(on_line, lines, delay_s) -> None:
@@ -408,15 +536,16 @@ def _drain(on_line, lines, delay_s) -> None:
 
 def vllm_log_lines(rank: int):
     serving_lines = [
-        f"INFO: KV usage {random.randint(25, 82)}%",
-        f"INFO: running={random.randint(0, 12)} waiting=0 decode={random.randint(20, 100)} tok/s",
-        "INFO: engine step scheduler tick",
-        f"INFO: nccl: roce allreduce ok (peer {rank})",
-        "INFO: speculative: accept_rates=[0.85,0.58,0.0]",
+        f"INFO: kv_cache_usage {random.randint(18, 74)}%",
+        "INFO: GLM_MHC_ENQUEUE ok (mesh 9975)",
+        f"INFO: scheduler budget 8192 coalesce=4 decode={random.randint(48, 66)} tok/s",
+        f"INFO: ring: roce p0/p1 ok (rank {rank} peers 3, GID3)",
+        "INFO: speculative: accept_rates=[0.86,0.61,0.24]",
     ]
     boot_lines = [
-        f"INFO: booting rank {rank} — instanttensor loader pass 1…",
-        "INFO: (Compressed 341) Loading checkpoint shards: 40%|███  | 82/206",
+        f"INFO: booting rank {rank} — checkpoint ~175 GiB (nvfp4-spark) 37%…",
+        "INFO: mesh supervisor attach: /opt/sparkring/managed-mesh (9975)",
+        "INFO: graph capture 74% — JIT warmup",
         "INFO: engine hold — waiting for peer rank",
     ]
     return [templates_ok(l) for l in (serving_lines if random.random() < 0.6 else boot_lines)]
@@ -508,8 +637,8 @@ def _dispatch_exec(rt: MockRuntime, cmd: str) -> ExecResult:
     if "show_gids" in c:
         rows = [
             "    hca  dev     port   rdma IslMap        GUID           GID-Index  v  IPv4",
-            "rocep1s0f1 (0) 3 3 0000:000a:000b:000c 0000:0000:0000:0000:0000:24bd:1834:3300 3 v2 10.100.80.2",
-            "rocep1s0f1 (0) 1 1 0000:000a:000b:000c 0000:0000:0000:0000:0000:24bd:1834:3300 3 v2 10.100.80.2",
+            "rocep1s0f1 (0) 3 3 0000:000a:000b:000c 0000:0000:0000:0000:0000:24bd:1834:3300 3 v2 198.18.0.10",
+            "rocep1s0f1 (0) 1 1 0000:000a:000b:000c 0000:0000:0000:0000:0000:24bd:1834:3300 3 v2 198.18.3.10",
             "SPARKDECK-GID: OK index=3",
         ]
         return ExecResult(0, "\n".join(rows), "")
@@ -519,6 +648,36 @@ def _dispatch_exec(rt: MockRuntime, cmd: str) -> ExecResult:
         js = {"Self": {"HostName": f"gx10-r{rank}", "TailscaleIPs": [f"100.101.10.{rank+2}"]},
               "Peer": {f"node{r}": {"HostName": f"gx10-r{r}", "Online": True} for r in range(4) if r != rank}}
         return ExecResult(0, "```json" + json.dumps(js), "")
+    if "/liveness" in c:
+        healthy = lc.healthy()
+        if not healthy:
+            return ExecResult(0, json.dumps({"healthy": False, "running_requests": 0,
+                                             "kv_cache_usage": 0.0,
+                                             "blocked_seconds": 0.0,
+                                             "output_stalled_seconds": 0.0}), "")
+        return ExecResult(0, json.dumps({
+            "healthy": True, "running_requests": lc.seed.randint(1, 8),
+            "kv_cache_usage": round(0.18 + 0.42 * lc.seed.random(), 3),
+            "blocked_seconds": round(lc.seed.random() * 2.0, 2),
+            "output_stalled_seconds": 0.0,
+            "model": MODEL, "version": "0.26.1rc0+glm53.flash.tp4.dcp1",
+        }), "")
+    if "sparkring.sh" in c:
+        verb = _sparkring_verb_of(c)
+        lines: list[str] = []
+        try:
+            rc = asyncio.get_event_loop().time()  # placeholder to keep sync ctx simple
+        except Exception:
+            pass
+        # exec-context verbs are answered synchronously with a canned receipt
+        canned: dict[str, str] = {
+            "status": "  status:glm-tp4-r0: running" if (lc.profile or lc.healthy()) else "  status:glm-tp4-r0: exited",
+            "liveness": "",
+            "help": "sparkring.sh help (mock)",
+        }
+        if verb == "liveness":
+            return ExecResult(0, canned["liveness"] or "HTTP 200\n{'healthy': true}", "")
+        return ExecResult(0, canned.get(verb, f"complete=True actions_ok=True ({verb})"), "")
     if "curl -fsS -m 4" in c and "echo $?" in c:
         healthy = lc.healthy()
         return ExecResult(0 if healthy else 1, "0" if healthy else "8", "")
@@ -537,9 +696,11 @@ def _dispatch_exec(rt: MockRuntime, cmd: str) -> ExecResult:
         return ExecResult(0, json.dumps({"version": "0.26.1rc0+glm53.flash.nvfp4.head0906", "number_of_gpu": 1}) if False else json.dumps({"version": "0.26.1rc0"}), "")
     if "GPU KV cache size" in c or ("docker logs" in c and "KV" in c):
         return ExecResult(0, f"{lc.kv_tokens}", "") if lc.profile else ExecResult(0, "", "")
+    if "glm-tp4-r0 --format" in c and "inspect" in c:
+        return ExecResult(0, lc.image if (lc.profile or lc.healthy()) else "", "")
     if "docker ps" in c or "container_list" in c:
         if lc.profile or lc.healthy():
-            js = {"ID": "deadbeef", "Names": f"glm53-flash-r{rank}", "Image": lc.image,
+            js = {"ID": "deadbeef", "Names": f"glm-tp4-r{rank}", "Image": lc.image,
                   "State": "running", "Status": f"Up {int(lc.uptime_s or 4)} seconds", "CreatedAt": "…"}
             return ExecResult(0, json.dumps(js), "")
         return ExecResult(0, "", "")
@@ -549,14 +710,16 @@ def _dispatch_exec(rt: MockRuntime, cmd: str) -> ExecResult:
         lines = []
         for name, cinfo in frames["docker"]["containers"].items():
             lines.append(json.dumps({"Name": name, "CPUPerc": f"{cinfo['cpu_pct']}%",
-                                     "MemUsage": f"{cinfo['mem_gib']}GiB / 120.0GiB",
+                                     "MemUsage": f"{cinfo['mem_gib']}GiB / 128.0GiB",
                                      "NetIO": f"{cinfo['rx_kbps']}kB / {cinfo['tx_kbps']}kB",
                                      "BlockIO": "0B / 13.3kB", "ID": "x", "Container": name,
                                      "MemPerc": "94%", "PIDs": "61"}))
         return ExecResult(0, "\n".join(lines), "")
     if "docker images" in c:
-        imgs = [IMAGE, "local/vllm:glm53-flash-nvfp4-devspark2-managed",
-                "local/vllm:glm53-flash-nvfp4-devspark-managed", "local/vllm:base-system:cu132"]
+        imgs = [RING_IMAGE.replace("@", ":tags-fix@"), RING_IMAGE,
+                "ghcr.io/fujitsupolycom/sparkring@sha256:0f11a2b3c4d5",
+                "local/vllm:glm53-flash-nvfp4-devspark2-managed",
+                "local/tools:base-system:cu132"]
         lines = [json.dumps({"Repository": i.split(":")[0], "Tag": i.split(":")[1],
                              "ID": f"sha256:{abs(hash(i)) % 999999:06d}", "CreatedSince": "2 days ago",
                              "Size": "24.9GB", "CreatedAt": "2026-09-06 21:47:00"}) for i in imgs]
@@ -597,26 +760,27 @@ def _fake_metrics(lc: ClusterLifecycle) -> str:
         f'vllm:generation_tokens_total{{model_name="{MODEL}",engine="0"}} {vals["generation_tokens"]}',
         f'vllm:prompt_tokens_total{{model_name="{MODEL}",engine="0"}} {vals["prompt_tokens"]}',
         'vllm:num_preemptions_total 3',
+        'vllm:request_prompt_tokens{model_name="glm-5.3-flash-spark",engine="0"} 8192',
         "# TYPE vllm:time_to_first_token_seconds histogram",
-        'vllm:time_to_first_token_seconds_bucket{le="0.05"} 12',
-        'vllm:time_to_first_token_seconds_bucket{le="0.25"} 61',
-        'vllm:time_to_first_token_seconds_bucket{le="0.5"} 128',
-        'vllm:time_to_first_token_seconds_bucket{le="1.0"} 190',
+        'vllm:time_to_first_token_seconds_bucket{le="0.05"} 61',
+        'vllm:time_to_first_token_seconds_bucket{le="0.25"} 190',
+        'vllm:time_to_first_token_seconds_bucket{le="0.5"} 220',
+        'vllm:time_to_first_token_seconds_bucket{le="1.0"} 238',
         'vllm:time_to_first_token_seconds_bucket{le="5.0"} 240',
         'vllm:time_to_first_token_seconds_bucket{le="inf"} 240',
-        'vllm:time_to_first_token_seconds_sum 187.4',
+        'vllm:time_to_first_token_seconds_sum 41.7',
         'vllm:time_to_first_token_seconds_count 240',
         "# TYPE vllm:inter_token_latency_seconds histogram",
-        'vllm:inter_token_latency_seconds_bucket{le="0.02"} 30000',
-        'vllm:inter_token_latency_seconds_bucket{le="0.05"} 72000',
-        'vllm:inter_token_latency_seconds_bucket{le="0.1"} 120000',
-        'vllm:inter_token_latency_seconds_bucket{le="0.25"} 198000',
+        'vllm:inter_token_latency_seconds_bucket{le="0.02"} 186000',
+        'vllm:inter_token_latency_seconds_bucket{le="0.05"} 204000',
+        'vllm:inter_token_latency_seconds_bucket{le="0.1"} 209000',
+        'vllm:inter_token_latency_seconds_bucket{le="0.25"} 210000',
         'vllm:inter_token_latency_seconds_bucket{le="inf"} 210000',
-        'vllm:inter_token_latency_seconds_sum 21000.2',
+        'vllm:inter_token_latency_seconds_sum 3350.3',
         'vllm:inter_token_latency_seconds_count 210000',
-        "# spec decode",
+        "# spec decode — native MTP depth 3 (~2.38 accepted of 3)",
         'vllm:spec_decode_num_accepted_tokens_total 12800',
-        'vllm:spec_decode_num_proposed_tokens_total 7900',
+        'vllm:spec_decode_num_proposed_tokens_total 5380',
     ]
     return "\n".join(lines)
 
@@ -642,3 +806,61 @@ KV_CACHE_MEMORY_BYTES=11274289152
 NCCL_IB_HCA=rocep1s0f1
 NCCL_IB_GID_INDEX=3
 """.strip() + "\n"
+
+
+class MockConsoleRuntime:
+    """Console runtime used by the op engine in mock mode: answers
+    sparkring.sh verb invocations (and plain curls) without any real host."""
+
+    kind = "local"
+
+    def __init__(self, world: MockWorld) -> None:
+        self.name = "sparkring-console-mock"
+        self.world = world
+        self.state = "online"
+        self.collector = "none"
+
+    async def stop(self) -> None:
+        return None
+
+    def snapshot(self) -> dict:
+        return {"node_id": self.name, "cluster_id": "", "state": "online",
+                "addr_used": "127.0.0.1", "conn_since": now_ms(),
+                "collector": "none", "last_sample_ts": None, "attempts": [],
+                "unverified": False}
+
+    async def exec(self, cmd: str, timeout: float = 30.0, stdin_data: str | None = None) -> ExecResult:
+        verb = _sparkring_verb_of(cmd)
+        if verb:
+            lines: list[str] = []
+            rc = await self.world.console_verb(verb, on_line=lines.append)
+            return ExecResult(rc, "\n".join(lines), "")
+        if "doctor --verify" in cmd:
+            lines2 = [
+                "sparkring doctor --verify",
+                "PASS r0 p0 198.18.0.10/24  MTU 9000/4096 GID3",
+                "PASS r1 p1 198.18.0.11/24  MTU 9000/4096 GID3",
+                "PASS r2 p1 198.18.1.11/24  MTU 9000/4096 GID3",
+                "PASS r3 p1 198.18.2.11/24  MTU 9000/4096 GID3",
+                "matrix: 16/16 RDMA functions PASS",
+            ]
+            return ExecResult(0, "\n".join(lines2), "")
+        return ExecResult(0, "", "")
+
+    async def sudo_exec(self, cmd: str, timeout: float = 60.0) -> tuple:
+        return (0, "", "")  # noqa: UP006 - parity tuple
+
+    async def stream_exec(self, cmd: str, timeout: float, on_line=None,
+                          stop_hints: tuple = (), cancelled=None) -> int:
+        verb = _sparkring_verb_of(cmd)
+        if verb:
+            return await self.world.console_verb(verb, on_line=on_line)
+        if on_line:
+            on_line("mock console: no handler for this stream")
+        return 0
+
+
+def _sparkring_verb_of(cmd: str) -> str | None:
+    c = cmd.strip()
+    m = re.search(r"sparkring\.sh\s+([a-z-]+)", c)
+    return m.group(1) if m else None
