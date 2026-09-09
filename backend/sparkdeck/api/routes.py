@@ -458,6 +458,10 @@ def attach(app, a) -> None:
         cl = a.cluster(cluster_id)
         if not cl:
             raise HTTPException(404, "cluster not found")
+        # ring-managed clusters have no per-rank env files — the image is part
+        # of the receipt-driven deployment (see OPERATIONS image runbook)
+        if "sparkring" in (cl["control"].get("launcher") or "").lower():
+            return {"envs": []}
         rows = []
         for p in cl["profiles"]:
             per_cluster = []
