@@ -48,6 +48,7 @@ export function Gauge({
   color,
   title,
   className,
+  valueMode = 'inside',
 }: {
   value: number | null;
   min?: number;
@@ -61,6 +62,10 @@ export function Gauge({
   color?: string;
   title?: string;
   className?: string;
+  /** 'inside' paints the value in the ring center (large); 'below' puts a
+      small value line under the ring — used by compact node cards where the
+      center text collides with the ring artwork. */
+  valueMode?: 'inside' | 'below';
 }) {
   const cx = size / 2;
   const cy = size / 2;
@@ -127,12 +132,22 @@ export function Gauge({
           )}
         </svg>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center pt-1">
-          <span className="sd-num font-mono text-[19px] leading-none font-semibold text-hi">
-            {valueText}
-          </span>
-          <span className="mt-0.5 font-mono text-[10px] text-low">{unit}</span>
+          {valueMode === 'inside' && (
+            <>
+              <span className="sd-num font-mono text-[19px] leading-none font-semibold text-hi">
+                {valueText}
+              </span>
+              <span className="mt-0.5 font-mono text-[10px] text-low">{unit}</span>
+            </>
+          )}
         </div>
       </div>
+      {valueMode === 'below' && (
+        <span className="sd-num mt-0.5 -mb-0.5 font-mono text-[10px] leading-none text-mid">
+          {valueText}
+          <span className="ml-0.5 text-low">{unit}</span>
+        </span>
+      )}
       {label !== undefined && <figcaption className="sd-monolabel mt-1">{label}</figcaption>}
     </figure>
   );

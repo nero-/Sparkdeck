@@ -264,7 +264,7 @@ class SSHRuntime:
         assert conn is not None
         api_port = int(self.cfg.get("api_port") or 8000)
         interest = ",".join(self.cfg.get("interest_ifaces") or [])
-        containers = "glm53"  # serving container name prefix (config later)
+        containers = "glm"  # matches glm53 (TP2) and glm-tp4 (SparkRing ring)
         cmd = (
             f"exec python3 -u ~/.sparkdeck/collector.py"
             f" --interval {self._interval} --api-port {api_port}"

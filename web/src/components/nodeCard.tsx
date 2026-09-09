@@ -1,17 +1,24 @@
 /* ============================================================================
    components/nodeCard — the per-node mini-card shared by Overview and Nodes
    (DESIGN.md "Node card: one glance = is this node healthy").
-   Reads its own live state from the WS buffers, so it can be embedded anywhere.
+
+   PERFORMANCE CONTRACT (the browser-lag lesson): the card NEVER subscribes
+   to whole sample frames. Every meter reads its own PRIMITIVE via a stable
+   selector (useSampleValue / useShallow string lists), so React re-renders
+   only when a displayed number actually changes — not on every WS tick.
+   The card itself is memo()'d: parent grids (overview/nodes) re-render on
+   events/ops churn without dragging every card along.
    ========================================================================= */
 
-import { useMemo, type ReactNode } from 'react';
+import { memo, useMemo, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Cable, Container, EthernetPort, Globe, Link2, Thermometer } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../lib/cn';
 import { Bar, Chip, Gauge, Sparkline, StatusDot, connDot, Tip } from '../ds';
-import { useLive } from '../stores/live';
-import { RING_CAP, containersFromSample, ifacesFromSample, useNodeRings } from '../stores/nodeRings';
-import { parseNum, pickSample } from './monShared';
+import { useSampleValue } from '../stores/live';
+import { useWs } from '../api/client';
+import { RING_CAP, useNodeRings } from '../stores/nodeRings';
 import { fmtGiB, fmtNum } from '../lib/format';
 import type { LiveNodeState, NodeConfig } from '../api/types';
 
@@ -42,11 +49,13 @@ const COLLECTOR_TONE = {
 } as const;
 
 /* ---------------------------------------------------------------------------
-   NodeCard — compact: dot·name·role, addr+collector, gpu gauge, mem bar
-   (warn horizon), temp chip, net rx sparkline, docker-container chips.
+   NodeCard — compact: dot·name·role, addr+collector, gpu gauge (value placed
+   BELOW the ring — center text collided at this size), mem bar anchored to
+   the node's real memory total with an explicit % readout, temp chip, net rx
+   sparkline, docker-container chips.
    --------------------------------------------------------------------------- */
 
-export function NodeCard({
+export const NodeCard = memo(function NodeCard({
   node,
   accent,
   state,
@@ -59,7 +68,8 @@ export function NodeCard({
   alerts: NodeAlerts | null | undefined;
   className?: string;
 }): ReactNode {
-  const sample = useLive((s) => s.lastSampleByNode[node.id]);
+  const conn = state?.state ?? 'unknown';
+  const collector = state?.collector ?? 'unprobed';
   const isHead = node.role === 'head';
   const alertsv = alertsFull(alerts);
 
@@ -74,15 +84,15 @@ export function NodeCard({
       )}
     >
       <div className="flex min-w-0 items-center gap-2">
-        <StatusDot state={connDot(state?.state ?? 'unknown')} size={8} title={`conn ${state?.state ?? 'unknown'}`} />
+        <StatusDot state={connDot(conn)} size={8} title={`conn ${conn}`} />
         <span className="truncate text-xs font-semibold text-hi group-hover:underline">{node.name}</span>
         <Chip
           variant={isHead ? 'accent' : 'neutral'}
           color={isHead ? accent : undefined}
           className="font-mono"
-          title={`role ${node.role} · env_rank ${node.env_rank}`}
+          title={`role ${node.role} · rank ${node.env_rank}`}
         >
-          {isHead ? 'head' : `w${node.env_rank}`}
+          {isHead ? 'head' : `r${node.env_rank}`}
         </Chip>
         {node.enabled ? null : (
           <Chip variant="warn" title="node disabled in the topology">
@@ -91,32 +101,32 @@ export function NodeCard({
         )}
         <span
           className="ml-auto min-w-0 truncate font-mono text-2xs text-low"
-          title={`addr_used — the address this node was last reached on`}
+          title="addr_used — the address this node was last reached on"
         >
           {state?.addr_used ?? '—'}
         </span>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-start gap-3">
         <GpuGaugeMini nodeId={node.id} accent={accent} />
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           <MemBarMini nodeId={node.id} alerts={alertsv} />
           <div className="flex min-w-0 items-center gap-2">
             <TempChipMini nodeId={node.id} alerts={alertsv} />
-            <NetSparkMini node={node} sample={sample} accent={accent} />
+            <NetSparkMini node={node} accent={accent} />
           </div>
         </div>
       </div>
 
-      <DockerChips sample={sample} accent={accent} />
+      <DockerChips nodeId={node.id} accent={accent} />
 
       <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-t border-stroke pt-1.5">
         <Chip
-          variant={COLLECTOR_TONE[state?.collector ?? 'unprobed'] as 'ok' | 'warn' | 'crit' | 'neutral'}
-          title={`collector — pushes samples every tick (${state?.collector ?? 'unprobed'})`}
+          variant={COLLECTOR_TONE[collector] as 'ok' | 'warn' | 'crit' | 'neutral'}
+          title={`collector — pushes samples every tick (${collector})`}
           className="font-mono"
         >
-          collector: {state?.collector ?? 'unprobed'}
+          collector: {collector}
         </Chip>
         {state?.state === 'online' && state.conn_since !== null && (
           <span className="font-mono text-2xs text-low" title="connection established">
@@ -126,36 +136,45 @@ export function NodeCard({
       </div>
     </Link>
   );
-}
+});
 
 /* ---------------------------------------------------------------------------
-   The meters — value reads from the latest sample frame; sparklines from the
-   client ring buffers fed by the samples topic (60 points ≈ last minute).
+   The meters — each reads ONE primitive from the shared live store.
    --------------------------------------------------------------------------- */
 
 export function GpuGaugeMini({ nodeId, accent }: { nodeId: string; accent: string }): ReactNode {
-  const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const util = parseNum(sample?.series['gpu.util']);
+  const util = useSampleValue(nodeId, 'gpu.util');
   return (
     <Gauge
       value={util}
       size={56}
       unit="%"
       color={accent}
+      valueMode="below"
       className="shrink-0"
       title={`gpu.util — ${util === null ? 'no sample yet' : `${util.toFixed(1)}%`}`}
     />
   );
 }
 
+/** Total unified memory of the node — mem.total_gib when the collector maps
+    it, falling back to used+avail (MemAvailable semantics make that exact
+    for GB10 unified boards). Keeps the bar anchored to something absolute;
+    anchoring to `used` itself made the fill asymptote and freeze (bug). */
+function useMemTotalGib(nodeId: string): number | null {
+  const total = useSampleValue(nodeId, 'mem.total_gib');
+  const used = useSampleValue(nodeId, 'mem.used_gib');
+  const avail = useSampleValue(nodeId, 'mem.avail_gib');
+  if (total !== null && total > 0) return total;
+  if (used !== null && avail !== null && used + avail > 0) return used + avail;
+  return null;
+}
+
 export function MemBarMini({ nodeId, alerts }: { nodeId: string; alerts: Required<NodeAlerts> }): ReactNode {
-  const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const used = parseNum(sample?.series['mem.used_gib']);
-  // the bar is anchored to the REAL memory total — anchoring it to the used
-  // value made the fill asymptote and stop moving (review + operator report)
-  const total = parseNum(sample?.series['mem.total_gib']);
-  const max = total !== null && total > 0 ? total : (used !== null ? used + 4 : 0);
+  const used = useSampleValue(nodeId, 'mem.used_gib');
+  const total = useMemTotalGib(nodeId);
   const { mem_warn_pct: warnPct, mem_crit_pct: critPct } = alerts;
+  const max = total ?? 0;
   const warnGib = max > 0 ? (max * warnPct) / 100 : 0;
   const critGib = max > 0 ? (max * critPct) / 100 : 0;
   const pct = used !== null && max > 0 ? Math.min(100, (used / max) * 100) : null;
@@ -166,7 +185,7 @@ export function MemBarMini({ nodeId, alerts }: { nodeId: string; alerts: Require
   return (
     <div
       className="min-w-0"
-      title={`mem.used_gib — ${used === null ? 'no sample' : `${fmtGiB(used)} of ${max > 0 ? fmtGiB(max) : '?'} (${pct === null ? '—' : pct.toFixed(1)}%)`}`}
+      title={`mem.used_gib — ${used === null ? 'no sample' : `${fmtGiB(used)} of ${max > 0 ? fmtGiB(max) : '?'} (${pct === null ? '—' : pct.toFixed(1)}%) · warn ${warnPct}% / crit ${critPct}% of total`}`}
     >
       <div className="mb-0.5 flex items-baseline justify-between gap-2">
         <span className="sd-monolabel">mem</span>
@@ -194,8 +213,7 @@ export function MemBarMini({ nodeId, alerts }: { nodeId: string; alerts: Require
 }
 
 export function TempChipMini({ nodeId, alerts }: { nodeId: string; alerts: Required<NodeAlerts> }): ReactNode {
-  const sample = useLive((s) => s.lastSampleByNode[nodeId]);
-  const temp = pickSample(sample?.series, 'gpu.temp');
+  const temp = useSampleValue(nodeId, 'gpu.temp');
   const { gpu_temp_warn_c: warn, gpu_temp_crit_c: crit } = alerts;
   const variant = temp === null ? 'neutral' : temp >= crit ? 'crit' : temp >= warn ? 'warn' : 'neutral';
   return (
@@ -210,24 +228,36 @@ export function TempChipMini({ nodeId, alerts }: { nodeId: string; alerts: Requi
   );
 }
 
+/** Busiest interface id chosen from the live sample — a STRING selector so
+    the component re-renders only when the ranking actually changes. */
+export function useBusiestIface(nodeId: string): string | null {
+  return useWs(
+    useShallow((s): string | null => {
+      const series = s.lastSampleByNode[nodeId]?.series;
+      if (!series) return null;
+      let best: { name: string; rx: number } | null = null;
+      for (const key in series) {
+        if (!key.startsWith('net.') || !key.endsWith('.rx_kbps')) continue;
+        const rx = series[key];
+        const n = key.slice(4, -7);
+        if (typeof rx === 'number' && Number.isFinite(rx) && (best === null || rx > best.rx)) {
+          best = { name: n, rx };
+        }
+      }
+      return best?.name ?? null;
+    }),
+  );
+}
+
 /** net rx sparkline for the node's primary iface (interest_ifaces[0] first,
     else the currently busiest iface in the sample). */
-export function NetSparkMini({
-  node,
-  sample,
-  accent,
-}: {
-  node: NodeConfig;
-  sample: { ts: number; series: Record<string, number | null> } | undefined;
-  accent: string;
-}): ReactNode {
-  const digest = sample === undefined ? undefined : ifacesFromSample(sample.series);
+export function NetSparkMini({ node, accent }: { node: NodeConfig; accent: string }): ReactNode {
+  const busiest = useBusiestIface(node.id);
   const rxId = useMemo(() => {
     const interest = node.interest_ifaces[0];
     if (interest !== undefined && interest !== '') return `net.${interest}.rx_kbps`;
-    const busiest = digest !== undefined && digest.length > 0 ? digest[0] : undefined;
-    return busiest !== undefined ? `net.${busiest.iface}.rx_kbps` : null;
-  }, [node.interest_ifaces, digest]);
+    return busiest !== null ? `net.${busiest}.rx_kbps` : null;
+  }, [node.interest_ifaces, busiest]);
 
   const rings = useNodeRings(node.id, rxId !== null ? [rxId] : []);
   const ring = rings[0];
@@ -247,35 +277,48 @@ export function NetSparkMini({
 }
 
 /* ---------------------------------------------------------------------------
-   Docker-aware container chips — swept from the live sample's docker series
-   (ids like docker.<ctr>.cpu_pct / .mem_gib). Present == container alive as
-   seen by the collector's docker stats tick.
+   Docker-aware container chips — swept from the sample's docker series
+   (ids like docker.<ctr>.cpu_pct / .mem_gib). useShallow over the NAME list:
+   re-render only when a container appears/disappears, not per tick.
    --------------------------------------------------------------------------- */
 
-export function DockerChips({ sample, accent }: { sample: { ts: number; series: Record<string, number | null> } | undefined; accent: string }): ReactNode {
-  const names = sample === undefined ? [] : containersFromSample(sample.series);
+export function DockerChips({ nodeId, accent }: { nodeId: string; accent: string }): ReactNode {
+  const names = useWs(
+    useShallow((s): string[] => {
+      const series = s.lastSampleByNode[nodeId]?.series;
+      if (!series) return [];
+      const set = new Set<string>();
+      for (const key in series) {
+        const m = /^docker\.(.+)\.cpu_pct$/.exec(key);
+        if (m !== null && m[1] !== undefined) set.add(m[1]);
+      }
+      return [...set].sort();
+    }),
+  );
   if (names.length === 0) return null;
-  const chips = names.map((ctr) => {
-    const cpu = pickSample(sample?.series, `docker.${ctr}.cpu_pct`);
-    const mem = pickSample(sample?.series, `docker.${ctr}.mem_gib`);
-    return { ctr, cpu, mem };
-  });
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-      {chips.map((c) => (
-        <Tip
-          key={c.ctr}
-          text={`docker kernels for ${c.ctr}: cpu_pct ${c.cpu === null ? '—' : c.cpu.toFixed(0)}% · mem_gib ${c.mem === null ? '—' : c.mem.toFixed(1)} (from the latest sample frame)`}
-        >
-          <Chip variant="ok" title={`container ${c.ctr} reported by the collector's docker tick`} className="font-mono">
-            <Container size={10} aria-hidden style={{ color: accent }} />
-            <span className="max-w-[150px] truncate">{c.ctr}</span>
-            <span className="sd-num text-low">{c.cpu === null ? '—' : fmtNum(Math.round(c.cpu))}%</span>
-            <span className="sd-num text-low">{c.mem === null ? '' : fmtGiB(c.mem)}</span>
-          </Chip>
-        </Tip>
+      {names.map((ctr) => (
+        <ContainerChip key={ctr} nodeId={nodeId} ctr={ctr} accent={accent} />
       ))}
     </div>
+  );
+}
+
+function ContainerChip({ nodeId, ctr, accent }: { nodeId: string; ctr: string; accent: string }): ReactNode {
+  const cpu = useSampleValue(nodeId, `docker.${ctr}.cpu_pct`);
+  const mem = useSampleValue(nodeId, `docker.${ctr}.mem_gib`);
+  return (
+    <Tip
+      text={`docker kernels for ${ctr}: cpu_pct ${cpu === null ? '—' : cpu.toFixed(0)}% · mem_gib ${mem === null ? '—' : mem.toFixed(1)} (from the latest sample frame)`}
+    >
+      <Chip variant="ok" title={`container ${ctr} reported by the collector's docker tick`} className="font-mono">
+        <Container size={10} aria-hidden style={{ color: accent }} />
+        <span className="max-w-[150px] truncate">{ctr}</span>
+        <span className="sd-num text-low">{cpu === null ? '—' : fmtNum(Math.round(cpu))}%</span>
+        <span className="sd-num text-low">{mem === null ? '' : fmtGiB(mem)}</span>
+      </Chip>
+    </Tip>
   );
 }
 

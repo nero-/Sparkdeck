@@ -302,15 +302,17 @@ def attach(app, a) -> None:
         if not cl:
             raise HTTPException(404, "cluster not found")
         ctx = a.make_ctx(cl)
-        profile_key = body.get("profile_key") or ""
-        if not profile_key_valid(cl, profile_key):
+        profile_key = (body.get("profile_key") or "").strip()
+        if profile_key == "":
+            profile_key = cl["profiles"][0]["key"] if cl["profiles"] else ""
+        elif not profile_key_valid(cl, profile_key):
             raise HTTPException(400, f"unknown profile {profile_key}")
         params = {
             "health_timeout_s": body.get("health_timeout_s"),
             "skip_preflight": body.get("skip_preflight", False),
             "extra": body.get("extra"),
         }
-        op = a.engine.submit("cluster.start", ctx, profile_key=profile_key, params=params)
+        op = a.engine.submit("cluster.start", ctx, profile_key=profile_key or None, params=params)
         return {"op_id": op.id}
 
     @r.post("/clusters/{cluster_id}/actions/stop")

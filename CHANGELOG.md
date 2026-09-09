@@ -49,3 +49,29 @@ controller & operator console (GLM-5.3-Flash TP2 scope).
   quick-links — one slice from every tab.
 - Bench defaults auto-detect the tool at `~/Builds` root;
   `SPARKDECK_BENCH_DIR` and `SPARKDECK_SPARKRING_DIR` env overrides added.
+
+## 1.2.0 — 2026-09-08 "console-in-your-shell + perf"
+
+- **CLI verbs**: `sparkdeck start|stop|down|ready|verify|check|preflight|
+  status|liveness|native-check|logs|prompt` drive the running controller
+  through the API (audited ops, streamed progress, proper exit codes). 
+  `SPARKDECK_URL` or `--host` reach a controller on another machine; without
+  a controller the CLI fails with a clear hint instead of bypassing audits.
+- **Perf: node cards stop re-rendering on every tick.** Cards now subscribe
+  to single PRIMITIVES (gpu.util, mem.used_gib…, container names via
+  shallow-compare) instead of whole sample frames, and are memo()'d — the
+  browser-lag report ("almost crashing") came from every WS sample tick
+  re-rendering every card. Updates now fire only when displayed values move.
+- **Gauge text**: the GPU gauge's big value no longer overlays the ring on
+  node cards — it renders below the ring in small mono.
+- **Fix — memory bars frozen/identical**: real ring frames carry
+  `mem.avgail/used` but no `mem.total_gib`; the collector now maps MemTotal,
+  and the card falls back to used+avail (exact for GB10 unified memory).
+  Bars are anchored to the true total again, and per-node since data flows.
+- **Collector**: container filter broadened `glm53` → `glm` so SparkRing
+  containers (`glm-tp4-rN`) appear in docker stats; deploy sha bumps
+  automatically on first connect.
+- **Alerts**: swap warn threshold raised to 4 GiB (SparkRing nodes sustain
+  2–4 GiB of swap while resident — the 0.5 GiB default spammed events).
+- Engine probes now treat `{data: []}` model lists as "still loading" and
+  wait (the mock + real behavior now aligned).

@@ -17,6 +17,25 @@ $ make serve          # REAL clusters (reads $HOME/.ssh/config + keys)
 $ make doctor         # read-only probe of the configured nodes
 ```
 
+## Driving the cluster from your shell
+
+With the controller running (`sparkdeck serve`, or the bundled systemd user
+unit), the console script speaks the same audited ops as the web UI:
+
+```bash
+sparkdeck start                 # cluster start, default profile + timeout
+sparkdeck start --timeout 3600  # cold JIT / fresh image first boot
+sparkdeck stop                  # model off — mesh supervisors stay up
+sparkdeck down                  # full teardown (model + mesh)
+sparkdeck status | liveness | ready | verify | check | preflight
+sparkdeck logs 2                # follow glm-tp4-r2 (Ctrl-C to stop)
+sparkdeck prompt "summarize X"  # one-shot chat through the served model
+```
+
+`recover` (mesh reset) and image-swap runbook actions stay console-gated in
+the web UI by design. The verbs require the controller; they never bypass
+the op trail.
+
 ## What it does
 
 | Area | Details |

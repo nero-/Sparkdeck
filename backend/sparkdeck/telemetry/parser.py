@@ -49,6 +49,7 @@ def frame_to_series(frame: dict) -> SampleFrame:
         out[f"cpu.core.{i}"] = v if isinstance(v, (int, float)) else None
 
     mem = frame.get("mem") or {}
+    out["mem.total_gib"] = mem.get("total_gib")
     out["mem.used_gib"] = mem.get("used_gib")
     out["mem.avail_gib"] = mem.get("avail_gib")
     out["mem.alloc_est_gib"] = mem.get("alloc_est_gib")

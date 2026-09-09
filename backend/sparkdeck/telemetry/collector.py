@@ -825,7 +825,7 @@ class Collector:
     def __init__(self, interval, api_port, containers, interest, candidate_ports):
         self.interval = max(0.5, float(interval))
         self.api_port = int(api_port or 8000)
-        self.ctr_re = re.compile(containers or "glm53")
+        self.ctr_re = re.compile(containers or "glm")  # glm53 (TP2) or glm-tp4 (ring)
         self.candidate_ports = [int(p) for p in (candidate_ports or "").split(",") if p.strip()]
         self.interest = set(x.strip() for x in (interest or "").split(",") if x.strip())
         self.tick = 0
@@ -840,7 +840,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="sparkdeck node collector")
     ap.add_argument("--interval", type=float, default=2.0)
     ap.add_argument("--api-port", type=int, default=8000)
-    ap.add_argument("--containers", default="glm53")
+    ap.add_argument("--containers", default="glm")
     ap.add_argument("--interest-ifaces", default="")
     ap.add_argument("--candidate-ports", default="8000")
     ap.add_argument("--selftest", action="store_true", help="read one NDJSON frame from /tmp/fakeframe and exit")

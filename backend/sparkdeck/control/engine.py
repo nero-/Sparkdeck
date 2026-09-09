@@ -16,6 +16,7 @@ The engine is transport-agnostic: runtimes implement exec/stream (+sudo).
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Awaitable, Callable
 
@@ -457,6 +458,8 @@ class OpEngine:
     def _cancelled(self, op: OpRecord):
         return lambda: op.state == "cancelled"
 
+
+
     def _head_probe_runtime(self, op: OpRecord, ctx: OpContext):
         head = self.head_node(ctx)
         rt = self.runtime(ctx, head)
@@ -471,7 +474,7 @@ class OpEngine:
         cmd = f'curl -s -m 8 http://127.0.0.1:{port}{path} 2>/dev/null'
         res = await self._run_on(op, rt, cmd, timeout=timeout)
         body = (res.stdout or "").strip()
-        return (res.exit in (0, None)) and body != "", body
+        return (res.exit in (0, None)) and _payload_alive(body), body
 
     @staticmethod
     def _head_alias(head: dict) -> str:
@@ -857,3 +860,20 @@ async def runtime_stream_exec(engine: "OpEngine", op: OpRecord, runtime, cmd: st
 async def runtime_follow(engine: "OpEngine", op: OpRecord, runtime, cmd: str, max_s: float, done_hint: tuple = ()) -> None:
     await runtime.stream_exec(cmd, timeout=max_s, on_line=lambda l: engine.livestep_line(op, l),
                               stop_hints=done_hint)
+
+def _payload_alive(body: str) -> bool:
+    """'alive' = curl succeeded AND the payload shows a loaded model.
+    Plain-text beats ("ok") count; a JSON envelope with a `data` list must be
+    non-empty — vLLM answers /v1/models with `{data: []}` while loading."""
+    if not body:
+        return False
+    head = body[:1]
+    if head in ("{", "["):
+        try:
+            d = json.loads(body)
+        except Exception:
+            return True
+        if isinstance(d, dict) and "data" in d:
+            return bool(d.get("data"))
+        return True
+    return True

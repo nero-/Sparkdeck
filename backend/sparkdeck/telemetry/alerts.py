@@ -47,9 +47,11 @@ class AlertEngine:
                 checks.append(("error", "temp.gpu.crit", gpu_temp, alerts.gpu_temp_crit_c))
             elif gpu_temp >= alerts.gpu_temp_warn_c:
                 checks.append(("warn", "temp.gpu.warn", gpu_temp, alerts.gpu_temp_warn_c))
+        # SparkRing nodes sustain 2–4 GiB of swap while the model is resident
+        # (page-cache pacing); 0.5 GiB cried wolf constantly
         swap = series.get("mem.swap_used_gib")
-        if swap is not None and swap >= 0.5:
-            checks.append(("warn", "mem.swap_used", swap, 0.5))
+        if swap is not None and swap >= 4.0:
+            checks.append(("warn", "mem.swap_used", swap, 4.0))
         throttle = series.get("gpu.throttle_thermal")
         if throttle is not None and throttle > 0:
             checks.append(("warn", "gpu.thermal_throttle", 1.0, 0.5))
