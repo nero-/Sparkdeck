@@ -384,7 +384,7 @@ def attach(app, a) -> None:
         rt = a.runtime_of(node_id)
         if rt is None or getattr(rt, "state", "offline") != "online":
             return {"containers": [], "state": "offline"}
-        res = await rt.exec("docker ps -a --format '{{json .}}' --filter name=glm53 2>&1", timeout=15)
+        res = await rt.exec("docker ps -a --format '{{json .}}' --filter name=glm 2>&1", timeout=15)
         rows = []
         for line in res.stdout.splitlines():
             line = line.strip()

@@ -12,6 +12,7 @@ One `SSHRuntime` per enabled node:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress as _suppress
 import logging
 import shutil
 import time
@@ -318,13 +319,58 @@ class SSHRuntime:
 
     async def exec(self, cmd: str, timeout: float = 30.0, stdin_data: str | None = None,
                    ) -> ExecResult:
+        """One-shot command. Uses the DEFAULT merged stderr stream — the GB10
+        nodes wedge when stderr is separately piped (see collector notes).
+        Timeouts CANCEL the waiter so the channel is closed and MaxSessions
+        is never exhausted; transport errors become `exit 255` results so
+        routes degrade instead of dumping 500s at their pollers."""
         conn = self._conn
         if conn is None:
             raise NodeUnreachable("not connected")
-        res = await asyncio.wait_for(
-            conn.run(cmd, input=stdin_data, stderr="p"), timeout  # type: ignore[arg-type]
-        )
-        return ExecResult(res.exit_status, res.stdout or "", res.stderr or "")
+
+        async def _run():
+            return await conn.run(cmd, input=stdin_data)  # merged stderr
+
+        task = asyncio.ensure_future(_run())
+        try:
+            res = await asyncio.wait_for(task, timeout)
+            out = res.stdout or ""
+            err = res.stderr or ""
+            return ExecResult(res.exit_status, out, err)
+        except asyncio.TimeoutError:
+            task.cancel()
+            with _suppress():
+                await asyncio.wait_for(task, 5)
+            return ExecResult(124, "", f"timeout after {timeout:g}s")
+        except (NodeUnreachable, asyncio.CancelledError):
+            raise
+        except Exception as exc:  # ChannelOpenError / DisconnectError / etc.
+            task.cancel()
+            with _suppress():
+                await task
+            ename = type(exc).__name__
+            if ename in ("ChannelOpenError", "ChannelListenError", "DisconnectError"):
+                self._bounce()
+            return ExecResult(255, "", f"ssh transport error ({ename}): {exc}")
+
+    def _bounce(self) -> None:
+        """Half-dead transport (e.g. MaxSessions refused after earlier channel
+        leaks): close the connection; the stream loop reconnects with backoff."""
+        now = time.monotonic()
+        if now - getattr(self, "_last_bounce", 0.0) < 10.0:
+            return  # already bouncing
+        self._last_bounce = now
+
+        async def _go():
+            conn = getattr(self, "_conn", None)
+            if conn is not None:
+                with _suppress():
+                    await conn.close()
+
+        try:
+            self._last_bounce_task = asyncio.get_running_loop().create_task(_go())
+        except RuntimeError:
+            pass
 
     async def sudo_exec(self, cmd: str, timeout: float = 60.0) -> ExecResult:
         """Privileged execution honouring the sudo resolution order."""

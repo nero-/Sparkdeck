@@ -68,7 +68,7 @@ class Tp2Verbs:
         if follow:
             return f"cd {q(self.control['serve_dir'])} && {self.launcher()} --logs {q(env)} 2>&1"
         return (
-            f"docker logs --tail {int(lines)} $(docker ps -aq --filter name=glm53 2>/dev/null | head -1) 2>&1"
+            f"docker logs --tail {int(lines)} $(docker ps -aq --filter name=glm 2>/dev/null | head -1) 2>&1"
         )
 
     def health_poll(self) -> str:
@@ -78,12 +78,12 @@ class Tp2Verbs:
     def kv_marker(self) -> str:
         """Extract boot-time KV pool size (tokens) from the head container log."""
         return (
-            "docker logs $(docker ps --filter name=glm53 --format '{{.Names}}' | head -1) 2>&1 | "
+            "docker logs $(docker ps --filter name=glm --format '{{.Names}}' | head -1) 2>&1 | "
             "grep -m1 -Eo 'GPU KV cache size: [0-9,]+' | grep -Eo '[0-9,]+' | tr -d ',' || true"
         )
 
     def container_list(self) -> str:
-        return ("docker ps -a --format '{{json .}}' --filter name=glm53 2>&1 || docker ps -a --format '{{json .}}' 2>&1")
+        return ("docker ps -a --format '{{json .}}' --filter name=glm 2>&1 || docker ps -a --format '{{json .}}' 2>&1")
 
     def docker_stats(self, minutes: int = 0) -> str:
         return "docker stats --no-stream --format '{{json .}}' 2>&1 | head -6"

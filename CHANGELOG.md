@@ -75,3 +75,24 @@ controller & operator console (GLM-5.3-Flash TP2 scope).
   2–4 GiB of swap while resident — the 0.5 GiB default spammed events).
 - Engine probes now treat `{data: []}` model lists as "still loading" and
   wait (the mock + real behavior now aligned).
+
+## 1.2.1 — 2026-09-08 "SSH channel hygiene" (hotfix)
+
+Backpressure fixes for the console-lag/error-storm report:
+
+- **exec() no longer separately pipes stderr** on node connections — the
+  documented GB10 asyncssh wedge (`ChannelOpenError`/hang) is triggered by
+  `stderr="p"`. Merged-stream only, everywhere.
+- **Timeouts no longer leak channels**: a timed-out exec now cancels its
+  waiter (closing the channel) instead of abandoning it — previously each
+  wedged/docker-slow call kept a channel open until MaxSessions refused all
+  further opens (`open failed` storms).
+- **Transport self-healing**: on ChannelOpen/Disconnect errors the runtime
+  bounces the connection and the stream loop reconnects (cooldown 10 s);
+  routes now receive `exit 255` + a compact reason instead of 500 dumps.
+- **Containers list filter broadened** `name=glm53` → `name=glm`, so
+  SparkRing `glm-tp4-rN` containers show up on Logs/Images pages.
+
+Deploy note: restart the controller once (`systemctl --user restart
+sparkdeck` or `pkill -f 'sparkdeck serve'`) so the new collector + filters
+take effect on all four nodes.
